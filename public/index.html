@@ -1,477 +1,593 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Soil Moisture Dashboard MVP - PostgreSQL</title>
-<!--
-CSS-стили имитируют Tailwind CSS.
--->
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
-<!-- Подключение Leaflet CSS -->
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
-<style>
-/* =======================================================
-ОСНОВНЫЕ СТИЛИ
-======================================================= */
-body {
-font-family: 'Inter', sans-serif;
-background-color: #f7fafc;
-padding: 2rem;
-min-height: 100vh;
-margin: 0;
-}
-header { margin-bottom: 1.5rem; }
-h1 {
-font-size: 1.875rem;
-font-weight: 700;
-color: #1f2937;
-}
-.text-gray-500 { color: #6b7280; }
-.grid {
-display: grid;
-gap: 1.5rem;
-grid-template-columns: 1fr;
-}
-@media (min-width: 1024px) {
-.grid { grid-template-columns: repeat(3, 1fr); }
-.lg\:col-span-2 { grid-column: span 2 / span 2; }
-.lg\:col-span-1 { grid-column: span 1 / span 1; }
-}
-/* Стили для контейнера карты - ВАЖНО иметь четкую высоту */
-#map {
-height: 80vh;
-min-height: 500px;
-border-radius: 0.75rem;
-box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-z-index: 1;
-background: #cbd5e1; /* Серый фон, пока карта грузится */
-}
-/* Стили для боковой панели */
-.sidebar {
-background-color: white;
-padding: 1.5rem;
-border-radius: 0.75rem;
-box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
-position: relative;
-}
-.sidebar h2 {
-font-size: 1.25rem;
-font-weight: 600;
-color: #374151;
-margin-bottom: 1rem;
-border-bottom: 1px solid #e5e7eb;
-padding-bottom: 0.5rem;
-}
-/* Контейнер для 3D */
-#threeD-container {
-width: 100%;
-height: 400px;
-border-radius: 0.5rem;
-margin-bottom: 1.5rem;
-background-color: #f1f5f9;
-border: 1px solid #e2e8f0;
-position: relative;
-overflow: hidden;
-}
-#threeD-container canvas {
-display: block;
-width: 100%;
-height: 100%;
-}
-
-/* Стиль для инфо-панели 3D (Popup) */
-#threeD-info {
-position: absolute;
-top: 10px;
-left: 10px;
-background: rgba(15, 23, 42, 0.9);
-color: white;
-padding: 8px 12px;
-border-radius: 6px;
-pointer-events: none;
-opacity: 0;
-transition: opacity 0.2s;
-z-index: 100;
-font-size: 12px;
-}
-/* Индикатор выбранного здания */
-#building-status {
-font-weight: 600;
-padding: 0.5rem;
-border-radius: 0.375rem;
-margin-bottom: 1rem;
-text-align: center;
-background-color: #fffbeb;
-color: #b45309;
-border: 1px solid #fcd34d;
-}
-
-.control-group {
-padding: 0.75rem;
-border-radius: 0.5rem;
-margin-bottom: 1rem;
-}
-.bg-blue-50 { background-color: #eff6ff; }
-.text-blue-800 { color: #1e40af; }
-.bg-green-50 { background-color: #ecfdf5; }
-.text-green-800 { color: #065f46; }
-
-/* Стиль для элементов управления */
-input[type="date"], input[type="range"] {
-width: 100%;
-margin-top: 0.25rem;
-padding: 0.5rem;
-border: 1px solid #bfdbfe;
-border-radius: 0.375rem;
-}
-/* Стиль для маркеров зданий */
-.custom-building-icon div {
-z-index: 1000;
-background-color: #1e293b;
-color: white;
-border-radius: 5px;
-padding: 5px 8px;
-font-weight: bold;
-font-size: 12px;
-box-shadow: 0 2px 5px rgba(0,0,0,0.5);
-cursor: pointer;
-border: 2px solid #ffffff;
-white-space: nowrap;
-}
-.custom-building-icon-selected div {
-background-color: #2563eb;
-border: 2px solid #fbbf24 !important;
-}
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Геопортал Мониторинга Грунта</title>
+    
+    <!-- Подключаем Leaflet CSS для карты -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <!-- Подключаем Tailwind CSS для красоты -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        #map { height: 600px; width: 100%; border-radius: 8px; }
+        .sidebar { background: #f8fafc; border-right: 1px solid #e2e8f0; height: 600px; overflow-y: auto; }
+        canvas { max-width: 100%; height: 500px !important; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/JoranBeaufort/Leaflet.idw@master/src/leaflet-idw.js"></script>
 </head>
-<body class="p-4 md:p-8">
+<body class="bg-gray-100 p-4">
 
-<header class="mb-6">
-<h1 class="text-3xl font-bold text-gray-800">Soil-Moisture Monitoring Dashboard</h1>
-<p class="text-gray-500">Визуализация данных из PostgreSQL в реальном времени (Астана).</p>
-</header>
+    <div class="max-w-7xl mx-auto">
 
-<div class="grid">
+        <div id="auth-container" style="position: absolute; top: 10px; right: 20px; z-index: 1000;">
+            <button id="login-btn" onclick="openLoginModal()" style="padding: 8px 15px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">Войти</button>
+            <span id="user-info" style="display: none; background: white; padding: 5px 10px; border-radius: 4px; box-shadow: 0 2px 5px rgba(0,0,0,0.2);"></span>
+            <button id="logout-btn" onclick="logout()" style="display: none; margin-left: 5px; padding: 5px 10px; background: #dc3545; color: white; border: none; border-radius: 4px; cursor: pointer;">Выйти</button>
+        </div>
+        
+        <div id="login-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 2000; justify-content: center; align-items: center;">
+            <div style="background: white; padding: 20px; border-radius: 8px; width: 300px; box-shadow: 0 4px 10px rgba(0,0,0,0.3);">
+                <h3>Авторизация</h3>
+                <input type="text" id="username-input" placeholder="Логин" style="width: 100%; margin-bottom: 10px; padding: 8px; box-sizing: border-box;">
+                <input type="password" id="password-input" placeholder="Пароль" style="width: 100%; margin-bottom: 15px; padding: 8px; box-sizing: border-box;">
+                <div style="display: flex; justify-content: space-between;">
+                    <button onclick="login()" style="padding: 8px 15px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer;">Войти</button>
+                    <button onclick="closeLoginModal()" style="padding: 8px 15px; background: #6c757d; color: white; border: none; border-radius: 4px; cursor: pointer;">Отмена</button>
+                </div>
+                <p id="login-error" style="color: red; font-size: 12px; margin-top: 10px;"></p>
+            </div>
+        </div>
 
-<!-- Основной блок - Карта -->
-<div class="lg:col-span-2">
-<div id="map"></div>
-</div>
+        <script>
+function openLoginModal() {
+    document.getElementById('login-modal').style.display = 'flex';
+}
 
-<!-- Боковая панель - Управление и 3D-визуализация -->
-<div class="lg:col-span-1 sidebar">
-<h2>3D Разрез шахт</h2>
-<div id="building-status">
-Выбрано здание: H-001
-</div>
+function closeLoginModal() {
+    document.getElementById('login-modal').style.display = 'none';
+    document.getElementById('login-error').innerText = '';
+}
 
-<!-- Контейнер для 3D-визуализации -->
-<div id="threeD-container">
-<!-- Панель для отображения данных при наведении в 3D -->
-<div id="threeD-info"></div>
-</div>
+async function login() {
+    const username = document.getElementById('username-input').value.trim();
+    const password = document.getElementById('password-input').value;
 
-<!-- Элементы управления -->
-<div id="controls-placeholder" class="space-y-4">
-<div class="control-group bg-blue-50">
-<p class="font-medium text-blue-800 text-sm">Календарь выбора даты</p>
-<input type="date" id="date-picker" value="2025-11-27"
-class="w-full mt-1 p-2 border border-blue-200 rounded-md"
-onchange="refreshDashboard()">
-</div>
-<div class="control-group bg-green-50">
-<p class="font-medium text-green-800 text-sm">Ползунок часа</p>
-<input type="range" min="8" max="17" value="8" id="hour-slider"
-class="w-full mt-2"
-oninput="document.getElementById('hourValue').innerText=this.value.padStart(2, '0') + ':00'; refreshDashboard()">
-<span id="hourValue" class="text-sm font-mono text-green-700 block text-right font-bold mt-1">08:00</span>
-</div>
-</div>
-</div>
-</div>
+    try {
+        const response = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+        });
 
-<!-- Библиотеки -->
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+        const data = await response.json();
 
+        if (data.success) {
+            localStorage.setItem('currentUser', JSON.stringify({ username: data.username, role: data.role }));
+            applyRolePermissions(data.role, data.username);
+            closeLoginModal();
+        } else {
+            document.getElementById('login-error').innerText = data.message;
+        }
+    } catch (err) {
+        console.error('Ошибка входа:', err);
+        document.getElementById('login-error').innerText = 'Ошибка соединения с сервером';
+    }
+}
+
+function logout() {
+    localStorage.removeItem('currentUser');
+    location.reload(); 
+}
+
+function applyRolePermissions(role, username) {
+    document.getElementById('login-btn').style.display = 'none';
+    
+    const userInfo = document.getElementById('user-info');
+    userInfo.style.display = 'inline-block';
+    userInfo.innerText = `${username} (${role})`;
+    
+    document.getElementById('logout-btn').style.display = 'inline-block';
+
+    // ВАЖНО: Принудительно делаем дашборд видимым
+    const dashboard = document.getElementById('main-dashboard');
+    if (dashboard) {
+        dashboard.style.display = 'block';
+    }
+
+    // Исправление для корректной отрисовки карты Leaflet
+    setTimeout(() => {
+        if (typeof map !== 'undefined') {
+            map.invalidateSize();
+        }
+    }, 200);
+
+    if (role === 'user') {
+        console.log('Режим просмотра (user)');
+    } else if (role === 'engineer') {
+        console.log('Режим инженера');
+    } else if (role === 'admin') {
+        console.log('Режим администратора');
+    }
+}
+
+// Автопроверка сессии при перезагрузке страницы, если пользователь уже залогинен
+window.addEventListener('DOMContentLoaded', () => {
+    const savedUser = localStorage.getItem('currentUser');
+    if (savedUser) {
+        const user = JSON.parse(savedUser);
+        applyRolePermissions(user.role, user.username);
+    }
+});
+
+        </script>
+
+
+
+        <header class="mb-6">
+            <h1 class="text-3xl font-bold text-gray-800">Мониторинг индекса влажности (IL)</h1>
+           
+        </header>
+
+        <div id="main-dashboard" style="display: none;">
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 bg-white p-4 rounded-xl shadow-lg">
+            
+            <!-- Левая панель: График -->
+            <div class="sidebar p-4 rounded-lg">
+                <!-- Блок выбора даты с кнопкой -->
+<div class="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
+    <label for="reading-date" class="block text-xs font-semibold text-gray-600 mb-1">ВЫБЕРИТЕ ДАТУ СРЕЗА ДАННЫХ:</label>
+    <div class="flex gap-2">
+        <input type="datetime-local" id="reading-date" class="w-full p-2 border border-gray-300 rounded text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500" value="2026-05-05T12:00">
+        <button id="apply-date-btn" class="px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded hover:bg-blue-700 transition">Ок</button>
+    </div>
+</div>
+                <h2 id="chartTitle" class="text-xl font-semibold mb-4 text-blue-600">Объект не выбран</h2>
+                <div class="relative">
+                    <canvas id="ilChart"></canvas>
+                </div>
+                <div id="dataInfo" class="mt-4 text-sm text-gray-500">
+                    Нажмите на маркер на карте, чтобы загрузить данные из БД.
+                </div>
+                
+            </div>
 <script>
-// =======================================================
-// I. ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ И НАСТРОЙКИ
-// =======================================================
-let map;
-const API_URL = '/api/sensors';
-let allSensors = [];
-let selectedBuildingId = 'H-001';
+async function loadSensorDataForObject(objectId) {
+    currentSelectedObjectId = objectId; // запоминаем выбранный объект
+    
+    // 1. Берем значение из календаря
+    const dateInput = document.getElementById('reading-date').value;
+    console.log("Выбранная дата из инпута:", dateInput); // ЧТО ПОКАЖЕТ ЭТО?
 
-// THREE.JS VARIABLES
-let scene, camera, renderer, controls, raycaster;
-let INTERSECTED;
-const NUM_LEVELS = 10;
-const LEVEL_HEIGHT = 6;
-const LEVEL_SIZE = 100;
-const GRID_SEGMENTS = 20;
+    // Форматируем для сервера
+    const formattedDate = dateInput ? dateInput.replace('T', ' ') + ':00' : '';
+    const url = `/api/object-details/${objectId}?date=${encodeURIComponent(formattedDate)}`;
+    console.log("URL запроса к серверу:", url); // ЧТО ПОКАЖЕТ ЭТО?
 
-// Маппинг труб (pipe_id) в 3D координаты углов
-const PIPE_COORDS = { 'S1': [0,0], 'S2': [100,0], 'S3': [100,100], 'S4': [0,100] };
+    try {
+        const response = await fetch(url);
+        const data = await response.json();
+        console.log("Данные, полученные от сервера:", data); // ПРИЛЕТАЮТ ЛИ ДАННЫЕ?
 
-// =======================================================
-// II. LEAFLET (КАРТА) ЛОГИКА
-// =======================================================
-function initializeMap() {
-console.log("Инициализация карты...");
-// Центр Астаны
-map = L.map('map').setView([51.169, 71.449], 16);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-attribution: '© OpenStreetMap contributors'
-}).addTo(map);
-
-// Принудительное обновление размера, если карта была скрыта
-setTimeout(() => { map.invalidateSize(); }, 200);
+        // Обновляем график
+        updateChart(data);
+    } catch (err) {
+        console.error('Ошибка при загрузке данных:', err);
+    }
 }
+// Переменная для хранения ID текущего выбранного объекта
+let currentSelectedObjectId = null;
 
-function getSensorColor(m) {
-if (m > 40) return '#ef4444';
-if (m > 30) return '#f97316';
-if (m > 20) return '#3b82f6';
-return '#10b981';
-}
-
-function renderSensorsOnMap(sensors) {
-if (!map) return;
-map.eachLayer(layer => { if (layer.options && layer.options.isSensor) map.removeLayer(layer); });
-
-sensors.forEach(sensor => {
-if (sensor.building_id !== selectedBuildingId) return;
-
-if (sensor.sensor_lat && sensor.sensor_long) {
-L.circleMarker([parseFloat(sensor.sensor_lat), parseFloat(sensor.sensor_long)], {
-radius: 7,
-fillColor: getSensorColor(sensor.moisture_value),
-color: sensor.is_epicenter ? '#000' : '#fff',
-weight: sensor.is_epicenter ? 3 : 1,
-fillOpacity: 0.8,
-isSensor: true
-}).addTo(map)
-.bindPopup(`Датчик: ${sensor.sensor_id}<br>Влажность: ${sensor.moisture_value}%`);
-}
-});
-}
-function renderBuildingsOnMap(sensors) {
-if (!map) return;
-map.eachLayer(layer => { if (layer.options && layer.options.isBuilding) map.removeLayer(layer); });
-
-const buildings = {};
-sensors.forEach(s => {
-if (!buildings[s.building_id]) {
-buildings[s.building_id] = {
-id: s.building_id,
-lat: s.building_lat,
-lng: s.building_long,
-};
-}
-});
-
-if (Object.keys(buildings).length === 0) {
-console.warn("Здания не найдены в полученных данных.");
-return;
-}
-
-Object.values(buildings).forEach(b => {
-const isSelected = b.id === selectedBuildingId;
-const icon = L.divIcon({
-className: `custom-building-icon ${isSelected ? 'custom-building-icon-selected' : ''}`,
-html: `<div>${b.id}</div>`,
-iconSize: [60, 24]
-});
-
-L.marker([parseFloat(b.lat), parseFloat(b.lng)], { icon, isBuilding: true })
-.addTo(map)
-.on('click', () => selectBuilding(b.id));
-});
-}
-function selectBuilding(id) {
-selectedBuildingId = id;
-document.getElementById('building-status').innerText = `Выбрано здание: ${id}`;
-refreshDashboard();
-}
-
-// =======================================================
-// III. THREE.JS (3D) ЛОГИКА
-// =======================================================
-function simplifiedInterpolation(x, z, sensorsOnLevel) {
-if (sensorsOnLevel.length < 2) return 50;
-let sumWeightMoisture = 0, sumWeight = 0;
-const power = 2;
-
-sensorsOnLevel.forEach(s => {
-const [sx, sz] = PIPE_COORDS[s.pipe_id] || [50, 50];
-const d2 = Math.pow(x - sx, 2) + Math.pow(z - sz, 2);
-if (d2 < 0.1) { sumWeightMoisture = s.moisture_value; sumWeight = 1; return; }
-const w = 1 / Math.pow(Math.sqrt(d2), power);
-sumWeightMoisture += w * s.moisture_value;
-sumWeight += w;
-});
-
-return sumWeight > 0 ? Math.min(100, Math.max(0, sumWeightMoisture / sumWeight)) : 50;
-}
-
-function createMoistureWave(levelIndex, sensorsForLevel) {
-const geometry = new THREE.PlaneGeometry(LEVEL_SIZE, LEVEL_SIZE, GRID_SEGMENTS, GRID_SEGMENTS);
-const yPos = -(levelIndex) * LEVEL_HEIGHT;
-const colorArr = new Float32Array(geometry.attributes.position.count * 3);
-
-for (let i = 0; i < geometry.attributes.position.count; i++) {
-const vertex = new THREE.Vector3().fromBufferAttribute(geometry.attributes.position, i);
-const xWorld = vertex.x + 50;
-const zWorld = vertex.y + 50;
-const m = sensorsForLevel.length > 0 ? simplifiedInterpolation(xWorld, zWorld, sensorsForLevel) : 20;
-const ratio = m / 100;
-const c = new THREE.Color().setHSL(0.33 * (1 - ratio), 1.0, 0.5);
-
-colorArr[i * 3] = c.r;
-colorArr[i * 3 + 1] = c.g;
-colorArr[i * 3 + 2] = c.b;
-geometry.attributes.position.setZ(i, vertex.z + (ratio * 2));
-}
-geometry.setAttribute('color', new THREE.BufferAttribute(colorArr, 3));
-geometry.attributes.position.needsUpdate = true;
-
-const wave = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
-vertexColors: true, transparent: true, opacity: 0.5, side: THREE.DoubleSide
-}));
-wave.rotation.x = -Math.PI / 2;
-wave.position.set(50, yPos + 0.1, 50);
-wave.userData.isWave = true;
-scene.add(wave);
-}
-
-function renderSensorsIn3D(sensors) {
-scene.children.filter(obj => obj.userData.isSensor || obj.userData.isWave || obj.userData.isLevel).forEach(obj => scene.remove(obj));
-
-for (let i = 0; i < NUM_LEVELS; i++) {
-const grid = new THREE.Mesh(
-new THREE.PlaneGeometry(LEVEL_SIZE, LEVEL_SIZE),
-new THREE.MeshBasicMaterial({ color: 0xcbd5e1, wireframe: true, transparent: true, opacity: 0.15 })
-);
-grid.rotation.x = -Math.PI / 2;
-grid.position.set(50, -i * LEVEL_HEIGHT, 50);
-grid.userData.isLevel = true;
-scene.add(grid);
-}
-
-const levels = {};
-sensors.forEach(s => {
-levels[s.sensor_depth] = levels[s.sensor_depth] || [];
-levels[s.sensor_depth].push(s);
-
-const mat = new THREE.MeshLambertMaterial({ color: getSensorColor(s.moisture_value) });
-const mesh = new THREE.Mesh(new THREE.SphereGeometry(2.5, 16, 16), mat);
-const [x, z] = PIPE_COORDS[s.pipe_id] || [50, 50];
-mesh.position.set(x, -(s.sensor_depth - 1) * LEVEL_HEIGHT, z);
-if (s.is_epicenter) mesh.scale.set(1.5, 1.5, 1.5);
-
-mesh.userData = {
-isSensor: true,
-id: s.sensor_id,
-moisture: s.moisture_value,
-depth: s.sensor_depth,
-originalColor: mat.color.getHex(),
-isEpicenter: s.is_epicenter
-};
-scene.add(mesh);
-});
-
-for (let i = 0; i < NUM_LEVELS; i++) {
-createMoistureWave(i, levels[i+1] || []);
-}
-}
-function initialize3D() {
-const container = document.getElementById('threeD-container');
-scene = new THREE.Scene();
-scene.background = new THREE.Color(0xf1f5f9);
-
-camera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.1, 1000);
-camera.position.set(130, 90, 130);
-renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(container.clientWidth, container.clientHeight);
-container.appendChild(renderer.domElement);
-
-scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-const light = new THREE.DirectionalLight(0xffffff, 1);
-light.position.set(100, 100, 100);
-scene.add(light);
-
-controls = new THREE.OrbitControls(camera, renderer.domElement);
-controls.target.set(50, -30, 50);
-controls.update();
-
-raycaster = new THREE.Raycaster();
-container.addEventListener('mousemove', onMouseMove);
-animate();
-}
-
-function onMouseMove(event) {
-const container = document.getElementById('threeD-container');
-const rect = container.getBoundingClientRect();
-const mouse = new THREE.Vector2(
-((event.clientX - rect.left) / container.clientWidth) * 2 - 1,
--((event.clientY - rect.top) / container.clientHeight) * 2 + 1
-);
-
-raycaster.setFromCamera(mouse, camera);
-const intersects = raycaster.intersectObjects(scene.children.filter(o => o.userData.isSensor));
-const info = document.getElementById('threeD-info');
-
-if (intersects.length > 0) {
-const obj = intersects[0].object;
-if (INTERSECTED != obj) {
-if (INTERSECTED) INTERSECTED.material.emissive.setHex(0x000000);
-INTERSECTED = obj;
-INTERSECTED.material.emissive.setHex(0x333333);
-info.innerHTML = `<strong>ID: ${obj.userData.id}</strong><br>Влажность: ${obj.userData.moisture}%<br>Глубина: ${obj.userData.depth}`;
-info.style.opacity = 1;
-}
-} else {
-if (INTERSECTED) INTERSECTED.material.emissive.setHex(0x000000);
-INTERSECTED = null;
-info.style.opacity = 0;
-}
-}
-function animate() {
-requestAnimationFrame(animate);
-if (controls) controls.update();
-if (renderer) renderer.render(scene, camera);
-}
-
-// =======================================================
-// IV. ЛОГИКА ДАННЫХ
-// =======================================================
-async function refreshDashboard() {
-const date = document.getElementById('date-picker').value;
-const hour = document.getElementById('hour-slider').value;
-console.log(`Запрос данных: Дата=${date}, Час=${hour}`);
-try {
-const response = await fetch(`${API_URL}?date=${date}&hour=${hour}`);
-if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
-const data = await response.json();
-console.log(`Получено записей: ${data.length}`);
-allSensors = data;
-renderBuildingsOnMap(data);
-renderSensorsOnMap(data);
-const buildingData = data.filter(s => s.building_id === selectedBuildingId);
-renderSensorsIn3D(buildingData);
-} catch (error) {
-console.error("Ошибка при обновлении данных:", error);
-}
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-initializeMap();
-initialize3D();
-refreshDashboard();
+// Слушаем событие изменения даты в календаре
+document.getElementById('reading-date').addEventListener('change', function() {
+    // Если объект на карте уже был выбран, при смене даты сразу пересчитываем график
+    if (currentSelectedObjectId) {
+        loadSensorDataForObject(currentSelectedObjectId);
+    }
 });
 </script>
+            <!-- Правая панель: Карта -->
+            <div class="lg:col-span-2">
+                <div class="mb-4 flex gap-2">
+                    <button id="toggleKriging" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded shadow">
+                        Average IL
+                    </button>
+                    <button id="toggleWMap" class="bg-teal-500 hover:bg-teal-600 text-white px-4 py-2 rounded shadow">
+                        Average W
+                    </button>
+                </div>
+                <div id="map"></div>
+            </div>
+            
+        </div>
+        </div>
+    </div>
+
+    <!-- Библиотеки -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <script>
+ // 1. Объявляем переменные ГЛОБАЛЬНО в самом верху
+// 1. Объявляем переменные в самом верху
+let interpolationLayer = null;
+
+// 2. Функция для создания слоя интерполяции (IDW)
+function createIDWLayer(data, map) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const size = map.getSize();
+    
+    // Оптимальное разрешение для баланса скорости и красоты
+    const scale = 4; 
+    canvas.width = size.x / scale;
+    canvas.height = size.y / scale;
+
+    // Сначала заливаем весь холст дефолтным ЗЕЛЕНЫМ
+    ctx.fillStyle = "rgba(34, 197, 94, 0.4)"; // Тот самый зеленый
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const points = data.map(p => {
+        const cp = map.latLngToContainerPoint([p[0], p[1]]);
+        return [cp.x / scale, cp.y / scale, p[2]];
+    });
+
+    // Проходим по пикселям
+    for (let y = 0; y < canvas.height; y++) {
+        for (let x = 0; x < canvas.width; x++) {
+            let num = 0, den = 0;
+            let closestDist = Infinity;
+
+            for (let i = 0; i < points.length; i++) {
+                const dx = x - points[i][0];
+                const dy = y - points[i][1];
+                const d = Math.sqrt(dx * dx + dy * dy);
+                
+                if (d < closestDist) closestDist = d;
+
+                // Математика интерполяции
+                const weight = 1 / Math.pow(d, 3); // Степень 3 вместо 2 делает ореолы вокруг точек компактнее
+                num += points[i][2] * weight;
+                den += weight;
+            }
+
+            // ПРОВЕРКА ДИСТАНЦИИ: 
+            // Если до ближайшего датчика больше 50 пикселей (на мини-холсте), 
+            // оставляем пиксель зеленым и идем дальше.
+            if (closestDist > 40) continue; 
+
+            const val = num / den;
+
+            // Вычисляем прозрачность в зависимости от расстояния (чтобы края пятен были мягкими)
+            // Чем дальше от датчика, тем сильнее просвечивает зеленый фон
+            let edgeAlpha = 1 - (closestDist / 50);
+            if (edgeAlpha < 0) edgeAlpha = 0;
+
+            // Определяем цвет пятна вокруг датчика
+            let color;
+            if (val <= 0.5) continue; // Если значение и так низкое, пусть остается зеленый фон
+            else if (val <= 1.0) color = `rgba(234, 179, 8, ${0.5 * edgeAlpha})`; // Желтый ореол
+            else color = `rgba(239, 68, 68, ${0.6 * edgeAlpha})`; // Красный ореол
+
+            ctx.fillStyle = color;
+            ctx.fillRect(x, y, 1, 1);
+        }
+    }
+
+    const bounds = map.getBounds();
+    return L.imageOverlay(canvas.toDataURL(), bounds, {
+        opacity: 0.8,
+        interactive: false,
+        zIndex: 5
+    });
+}
+
+// 3. Обработчик кнопки
+document.getElementById('toggleKriging').addEventListener('click', async function() {
+    if (interpolationLayer) {
+        map.removeLayer(interpolationLayer);
+        interpolationLayer = null;
+        this.innerText = "Average IL";
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/objects');
+        const objects = await response.json();
+        
+        const idwData = objects
+            .filter(o => o.avg_il !== null)
+            .map(o => [parseFloat(o.lat), parseFloat(o.lng), parseFloat(o.avg_il)]);
+
+        if (idwData.length === 0) return alert("Нет данных");
+
+        // Создаем и добавляем слой
+        interpolationLayer = createIDWLayer(idwData, map);
+        interpolationLayer.addTo(map);
+
+        this.innerText = "Hide IL Map";
+
+        // Перерисовывать при сдвиге карты, чтобы охват всегда был на весь экран
+        map.once('moveend', () => {
+            if (interpolationLayer) {
+                map.removeLayer(interpolationLayer);
+                interpolationLayer = createIDWLayer(idwData, map);
+                interpolationLayer.addTo(map);
+            }
+        });
+
+    } catch (err) {
+        console.error(err);
+    }
+});
+</script>
+
+<script>
+
+let wLayer = null; // Глобальная переменная для слоя W
+
+document.getElementById('toggleWMap').addEventListener('click', async function() {
+    if (wLayer) {
+        map.removeLayer(wLayer);
+        wLayer = null;
+        this.innerText = "Average W";
+        this.classList.replace('bg-red-600', 'bg-teal-500');
+        return;
+    }
+
+    // Если включен слой IL, выключаем его, чтобы не накладывались
+    if (interpolationLayer) document.getElementById('toggleKriging').click();
+
+    try {
+        const response = await fetch('/api/objects');
+        const objects = await response.json();
+        
+        // Берем данные avg_w (влажность)
+        const wData = objects
+            .filter(o => o.avg_w !== null)
+            .map(o => [parseFloat(o.lat), parseFloat(o.lng), parseFloat(o.avg_w)]);
+
+        if (wData.length === 0) return alert("Нет данных по влажности");
+
+        // Создаем слой W
+        wLayer = createWLayer(wData, map);
+        wLayer.addTo(map);
+
+        this.innerText = "Hide W Map";
+        this.classList.replace('bg-teal-500', 'bg-red-600');
+
+    } catch (err) {
+        console.error(err);
+    }
+});
+
+// Функция отрисовки слоя W (Влажность)
+function createWLayer(data, map) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const size = map.getSize();
+    const scale = 2; 
+    canvas.width = size.x / scale;
+    canvas.height = size.y / scale;
+
+    // 1. Устанавливаем СВЕТЛО-ЖЕЛТЫЙ фон
+    // rgba(254, 249, 195, 0.5) — это мягкий кремово-желтый
+    ctx.fillStyle = "rgba(254, 249, 195, 0.5)"; 
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const points = data.map(p => {
+        const cp = map.latLngToContainerPoint([p[0], p[1]]);
+        return [cp.x / scale, cp.y / scale, p[2]];
+    });
+
+    const radius = 45; // Чуть увеличили радиус для лучшего слияния
+
+    points.forEach(p => {
+        const x = p[0];
+        const y = p[1];
+        const val = p[2];
+
+        // 2. НАСЫЩЕННАЯ ГРАДАЦИЯ КРАСНОГО
+        let color;
+        if (val < 20) {
+            color = "239, 68, 68";   // Ярко-красный (Red 500)
+        } else if (val < 30) {
+            color = "185, 28, 28";   // Насыщенный темно-красный (Red 700)
+        } else {
+            color = "127, 29, 29";   // Глубокий бордовый (Red 900)
+        }
+
+        // 3. СОЗДАЕМ ГРАДИЕНТ
+        const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
+        
+        // Сделали центр более плотным (0.9), чтобы цвет был насыщеннее
+        gradient.addColorStop(0, `rgba(${color}, 0.9)`); 
+        gradient.addColorStop(0.4, `rgba(${color}, 0.5)`); 
+        gradient.addColorStop(1, `rgba(${color}, 0)`); 
+
+        ctx.fillStyle = gradient;
+        
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fill();
+    });
+
+    const bounds = map.getBounds();
+    return L.imageOverlay(canvas.toDataURL(), bounds, {
+        opacity: 1, 
+        interactive: false,
+        zIndex: 5
+    });
+}
+
+</script>
+
+
+    <script>
+        // --- 1. Инициализация карты ---
+        const map = L.map('map').setView([51.1228, 71.4271], 13); // Центр на Астану
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap'
+        }).addTo(map);
+
+        let ilChart; // Переменная для хранения экземпляра графика
+
+        // --- 2. Функция отрисовки графика ---
+        function updateChart(objectId, data) {
+            const ctx = document.getElementById('ilChart').getContext('2d');
+            document.getElementById('chartTitle').innerText = `Объект: ${objectId}`;
+            
+// Сортируем данные по глубине для правильного отображения линии
+data.sort((a, b) => b.depth_m - a.depth_m);
+
+            // Подготовка данных: X - это IL, Y - это глубина
+            const points = data.map(item => ({
+                x: item.il_value, 
+                y: item.depth_m
+            }));
+
+            if (ilChart) {
+                ilChart.destroy(); // Удаляем старый график перед созданием нового
+            }
+
+            ilChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    datasets: [{
+                        label: 'Индекс влажности (IL)',
+                        data: points,
+                        borderColor: '#2563eb',
+                        backgroundColor: 'rgba(37, 99, 235, 0.2)',
+                        borderWidth: 2,
+                        pointRadius: 4,
+                        tension: 0.1, // Сглаживание линии
+                        showLine: true,
+
+                // Динамический цвет точек (заливка)
+                pointBackgroundColor: data.map(item => {
+                    const il = item.il_value;
+                    if (il <= 0) return '#22c55e';      // Зеленый 
+                    if (il > 0 && il <= 1) return '#eab308'; // Желтый 
+                    return '#ef4444';                   // Красный 
+                }),
+                // Динамический цвет границ точек
+                pointBorderColor: data.map(item => {
+                    const il = item.il_value;
+                    if (il <= 0) return '#166534';
+                    if (il > 0 && il <= 1) return '#854d0e';
+                    return '#991b1b';
+                }),
+                pointRadius: 5,
+                pointHoverRadius: 7
+
+                }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            type: 'linear',
+                            position: 'bottom',
+                            min: -1,
+                            max: 2,
+                            title: { display: true, text: 'Liquidity Index (IL)' },
+                            grid: { color: '#e2e8f0' }
+                        },
+                        y: {
+                            type: 'linear',
+                            min: -25,
+                            max: 0,
+                            title: { display: true, text: 'Глубина (м)' },
+                            grid: { color: '#e2e8f0' }
+                        }
+                    },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return `IL: ${context.parsed.x.toFixed(4)}, Глубина: ${context.parsed.y}м`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // --- 3. Загрузка объектов на карту ---
+        async function loadObjects() {
+    try {
+        const response = await fetch('/api/objects');
+        const objects = await response.json();
+
+        objects.forEach(obj => {
+            // 1. Определяем цвет точки на основе среднего IL
+            let statusColor = "#94a3b8"; // По умолчанию серый
+            const avg = obj.avg_il;
+            
+            if (avg !== null) {
+                if (avg <= 0) statusColor = "#22c55e";      // Зеленый
+                else if (avg <= 1) statusColor = "#eab308"; // Желтый
+                else statusColor = "#ef4444";               // Красный
+            }
+
+            // 2. Создаем круглый маркер вместо пина
+            const marker = L.circleMarker([obj.lat, obj.lng], {
+                radius: 10,           // Размер точки
+                fillColor: statusColor,
+                color: "#ffffff",      // Цвет обводки
+                weight: 2,            // Толщина обводки
+                opacity: 1,
+                fillOpacity: 0.9      // Прозрачность заливки
+            }).addTo(map);
+
+            // 3. Подготовка текста для Popup
+            const avgILValue = obj.avg_il;
+    const avgWValue = obj.avg_w; // Берем значение влажности
+
+    const displayIL = (avgILValue !== null) ? avgILValue : "нет данных";
+    const displayW = (avgWValue !== null) ? avgWValue + "%" : "нет данных";
+
+    let statusText = "";
+    if (avgILValue !== null) {
+        if (avgILValue <= 0) statusText = "(Normal)";
+        else if (avgILValue <= 1) statusText = "(Risk)";
+        else statusText = "(Waterlogging)";
+    }
+
+    // Обновленный шаблон Popup
+    marker.bindPopup(`
+        <div style="text-align: center; font-family: sans-serif;">
+            <b style="font-size: 14px;">Объект: ${obj.object_id}</b><br>
+            <hr style="margin: 5px 0;">
+            <div style="text-align: left; font-size: 12px;">
+                Глубина расчета (N): ${obj.n_levels}<br>
+                <b>Средний IL:</b> ${displayIL} <br>
+                <b>Средний W:</b> <span>${displayW}</span>
+            </div>
+            <hr style="margin: 5px 0;">
+            <span style="color: ${statusColor}; font-weight: bold;">${statusText}</span>
+        </div>
+    `);
+
+    // 4. Клик на точку для обновления графика
+    marker.on('click', async () => {
+        console.log("Клик по объекту:", obj.object_id);
+        const res = await fetch(`/api/object-details/${obj.object_id}`);
+        const details = await res.json();
+        updateChart(obj.object_id, details);
+    });
+});
+
+    } catch (err) {
+        console.error("Ошибка загрузки объектов:", err);
+    }
+}
+        
+
+        loadObjects();
+    </script>
 </body>
 </html>
