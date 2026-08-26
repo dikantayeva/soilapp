@@ -63,12 +63,16 @@ app.get('/api/object-details/:objectId', async (req, res) => {
 
         if (selectedDate) {
             query = `
-                SELECT SR.*, S.depth_m 
-                FROM sensors S
-                JOIN sensor_readings SR ON S.sensor_id = SR.sensor_id
-                WHERE S.object_id = $1 
-                  AND date_trunc('minute', SR.timestamp) = date_trunc('minute', $2::timestamptz)
-                ORDER BY S.depth_m ASC;
+                SELECT * FROM (
+                    SELECT DISTINCT ON (S.sensor_id)
+                        SR.*, S.depth_m 
+                    FROM sensors S
+                    JOIN sensor_readings SR ON S.sensor_id = SR.sensor_id
+                    WHERE S.object_id = $1 
+                      AND date_trunc('minute', SR.timestamp) = date_trunc('minute', $2::timestamptz)
+                    ORDER BY S.sensor_id, SR.timestamp DESC
+                ) sub
+                ORDER BY depth_m ASC;
             `;
             values = [objectId, selectedDate];
         } else {
