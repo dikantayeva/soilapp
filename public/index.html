@@ -155,25 +155,46 @@ window.addEventListener('DOMContentLoaded', () => {
 <script>
 async function loadSensorDataForObject(objectId) {
     currentSelectedObjectId = objectId; // запоминаем выбранный объект
-    
+
+    // Сразу убираем старый график, чтобы он не "залипал",
+    // пока не пришёл ответ по новой дате
+    if (ilChart) {
+        ilChart.destroy();
+        ilChart = null;
+    }
+    document.getElementById('chartTitle').innerText = `Объект: ${objectId} — загрузка...`;
+
     // 1. Берем значение из календаря
     const dateInput = document.getElementById('reading-date').value;
-    console.log("Выбранная дата из инпута:", dateInput); // ЧТО ПОКАЖЕТ ЭТО?
+    console.log("Выбранная дата из инпута:", dateInput);
 
-    // Форматируем для сервера
-    const formattedDate = dateInput ? dateInput.replace('T', ' ') + ':00' : '';
+    // Форматируем для сервера: явно указываем 'Z' (UTC),
+    // чтобы не зависеть от настроек таймзоны сессии на стороне БД
+    const formattedDate = dateInput ? dateInput + ':00Z' : '';
     const url = `/api/object-details/${objectId}?date=${encodeURIComponent(formattedDate)}`;
-    console.log("URL запроса к серверу:", url); // ЧТО ПОКАЖЕТ ЭТО?
+    console.log("URL запроса к серверу:", url);
 
     try {
-        const response = await fetch(url);
+        const response = await fetch(url, { cache: 'no-store' });
+
+        if (!response.ok) {
+            throw new Error(`Сервер вернул ошибку: ${response.status}`);
+        }
+
         const data = await response.json();
-        console.log("Данные, полученные от сервера:", data); // ПРИЛЕТАЮТ ЛИ ДАННЫЕ?
+        console.log("Данные, полученные от сервера:", data);
+
+        if (!data || data.length === 0) {
+            // Данных за выбранную дату нет — график остаётся пустым
+            document.getElementById('chartTitle').innerText = `Объект: ${objectId} — нет данных за выбранную дату`;
+            return;
+        }
 
         // Обновляем график
-        updateChart(data);
+        updateChart(objectId, data);
     } catch (err) {
         console.error('Ошибка при загрузке данных:', err);
+        document.getElementById('chartTitle').innerText = `Объект: ${objectId} — ошибка загрузки данных`;
     }
 }
 // Переменная для хранения ID текущего выбранного объекта
@@ -186,16 +207,36 @@ document.getElementById('reading-date').addEventListener('change', function() {
         loadSensorDataForObject(currentSelectedObjectId);
     }
 });
+
+// Слушаем нажатие на кнопку "Ок"
+document.getElementById('apply-date-btn').addEventListener('click', function() {
+    if (currentSelectedObjectId) {
+        loadSensorDataForObject(currentSelectedObjectId);
+    } else {
+        alert('Сначала выберите объект на карте');
+    }
+});
 </script>
             <!-- Правая панель: Карта -->
             <div class="lg:col-span-2">
-                <div class="mb-4 flex gap-2">
+                <div class="mb-4 flex gap-2 items-center flex-wrap">
                     <button id="toggleKriging" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded shadow">
                         Average IL
                     </button>
                     <button id="toggleWMap" class="bg-teal-500 hover:bg-teal-600 text-white px-4 py-2 rounded shadow">
                         Average W
                     </button>
+
+                    <!-- Поиск объекта -->
+                    <div class="flex gap-2 ml-auto">
+                        <input type="text" id="objectSearchInput" list="objectSearchList"
+                               placeholder="Поиск объекта (ID)..."
+                               class="px-3 py-2 border border-gray-300 rounded text-sm w-48 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <datalist id="objectSearchList"></datalist>
+                        <button id="objectSearchBtn" class="bg-gray-700 hover:bg-gray-800 text-white px-4 py-2 rounded shadow text-sm">
+                            Найти
+                        </button>
+                    </div>
                 </div>
                 <div id="map"></div>
             </div>
@@ -433,6 +474,9 @@ function createWLayer(data, map) {
 
         let ilChart; // Переменная для хранения экземпляра графика
 
+        // Словарь: object_id -> маркер на карте, для поиска
+        const markersByObjectId = {};
+
         // --- 2. Функция отрисовки графика ---
         function updateChart(objectId, data) {
             const ctx = document.getElementById('ilChart').getContext('2d');
@@ -572,20 +616,59 @@ data.sort((a, b) => b.depth_m - a.depth_m);
         </div>
     `);
 
-    // 4. Клик на точку для обновления графика
-    marker.on('click', async () => {
+    // 4. Клик на точку для обновления графика (с учётом выбранной даты)
+    marker.on('click', () => {
         console.log("Клик по объекту:", obj.object_id);
-        const res = await fetch(`/api/object-details/${obj.object_id}`);
-        const details = await res.json();
-        updateChart(obj.object_id, details);
+        loadSensorDataForObject(obj.object_id);
     });
+
+    // 5. Сохраняем маркер в словарь для поиска
+    markersByObjectId[obj.object_id] = marker;
 });
+
+        // Заполняем список автодополнения ID-шниками объектов
+        const searchDatalist = document.getElementById('objectSearchList');
+        searchDatalist.innerHTML = '';
+        Object.keys(markersByObjectId).forEach(id => {
+            const option = document.createElement('option');
+            option.value = id;
+            searchDatalist.appendChild(option);
+        });
 
     } catch (err) {
         console.error("Ошибка загрузки объектов:", err);
     }
 }
         
+
+        // --- 4. Поиск объекта на карте ---
+        function goToObject(rawId) {
+            const objectId = (rawId || '').trim();
+            if (!objectId) return;
+
+            const marker = markersByObjectId[objectId];
+            if (!marker) {
+                alert(`Объект с ID "${objectId}" не найден`);
+                return;
+            }
+
+            // Приближаем карту к объекту
+            map.setView(marker.getLatLng(), 16, { animate: true });
+
+            // Открываем попап и подгружаем график, как при обычном клике
+            marker.openPopup();
+            marker.fire('click');
+        }
+
+        document.getElementById('objectSearchBtn').addEventListener('click', () => {
+            goToObject(document.getElementById('objectSearchInput').value);
+        });
+
+        document.getElementById('objectSearchInput').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                goToObject(e.target.value);
+            }
+        });
 
         loadObjects();
     </script>

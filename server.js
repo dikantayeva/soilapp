@@ -23,6 +23,12 @@ pool.query('SELECT NOW()', (err) => {
     else console.log('✅ База данных подключена успешно!');
 });
 
+// Фиксируем таймзону сессии в UTC, чтобы даты из фронта
+// сравнивались с данными в базе без смещения
+pool.on('connect', (client) => {
+    client.query('SET timezone = "UTC";');
+});
+
 app.use(express.static('public'));
 
 /**
@@ -56,15 +62,15 @@ app.get('/api/object-details/:objectId', async (req, res) => {
         let query, values;
 
         if (selectedDate) {
-            const targetDay = selectedDate.split(' ')[0]; 
             query = `
                 SELECT SR.*, S.depth_m 
                 FROM sensors S
                 JOIN sensor_readings SR ON S.sensor_id = SR.sensor_id
-                WHERE S.object_id = $1 AND DATE(SR.timestamp) = $2
+                WHERE S.object_id = $1 
+                  AND date_trunc('minute', SR.timestamp) = date_trunc('minute', $2::timestamptz)
                 ORDER BY S.depth_m ASC;
             `;
-            values = [objectId, targetDay];
+            values = [objectId, selectedDate];
         } else {
             query = `
                 SELECT SR.*, S.depth_m 
@@ -76,6 +82,7 @@ app.get('/api/object-details/:objectId', async (req, res) => {
             values = [objectId];
         }
 
+        
         const result = await pool.query(query, values);
         res.json(result.rows);
 
@@ -84,6 +91,7 @@ app.get('/api/object-details/:objectId', async (req, res) => {
         res.status(500).json({ success: false, message: 'Ошибка сервера' });
     }
 });
+
 
 // Обязательно убедитесь, что включен парсер JSON в начале server.js:
 app.use(express.json());
