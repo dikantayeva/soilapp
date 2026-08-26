@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Геопортал Мониторинга Грунта</title>
+    <title>Геопортал</title>
     
     <!-- Подключаем Leaflet CSS для карты -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -16,6 +16,7 @@
     </style>
     <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
     <script src="https://cdn.jsdelivr.net/gh/JoranBeaufort/Leaflet.idw@master/src/leaflet-idw.js"></script>
+    <script src="https://unpkg.com/@sakitam-gis/kriging/dist/kriging.min.js"></script>
 </head>
 <body class="bg-gray-100 p-4">
 
@@ -126,7 +127,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
 
         <header class="mb-6">
-            <h1 class="text-3xl font-bold text-gray-800">Мониторинг индекса влажности (IL)</h1>
+            <h1 class="text-3xl font-bold text-gray-800">Мониторинг влажности почвы</h1>
            
         </header>
 
@@ -143,10 +144,27 @@ window.addEventListener('DOMContentLoaded', () => {
         <button id="apply-date-btn" class="px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded hover:bg-blue-700 transition">Ок</button>
     </div>
 </div>
-                <h2 id="chartTitle" class="text-xl font-semibold mb-4 text-blue-600">Объект не выбран</h2>
-                <div class="relative">
-                    <canvas id="ilChart"></canvas>
-                </div>
+<div class="flex gap-2 mb-3 items-center">
+    <button id="modeProfileBtn" class="px-3 py-1.5 text-xs font-semibold rounded bg-blue-600 text-white">
+        Профиль по глубине
+    </button>
+    <button id="modeTrendBtn" class="px-3 py-1.5 text-xs font-semibold rounded bg-gray-200 text-gray-700">
+        Тренд по времени
+    </button>
+    <button id="exportCsvBtn" class="ml-auto px-3 py-1.5 text-xs font-semibold rounded bg-green-600 text-white hover:bg-green-700">
+        Экспорт CSV
+    </button>
+</div>
+
+<div id="depthSelectWrapper" class="mb-3" style="display: none;">
+    <label for="depth-select" class="block text-xs font-semibold text-gray-600 mb-1">ГЛУБИНА ДАТЧИКА:</label>
+    <select id="depth-select" class="w-full p-2 border border-gray-300 rounded text-sm bg-white"></select>
+</div>
+
+<h2 id="chartTitle" class="text-xl font-semibold mb-4 text-blue-600">Объект не выбран</h2>
+<div class="relative">
+    <canvas id="ilChart"></canvas>
+</div>
                 <div id="dataInfo" class="mt-4 text-sm text-gray-500">
                     Нажмите на маркер на карте, чтобы загрузить данные из БД.
                 </div>
@@ -190,8 +208,17 @@ async function loadSensorDataForObject(objectId) {
             return;
         }
 
-        // Обновляем график
-        updateChart(objectId, data);
+        // Сохраняем профиль — понадобится для списка глубин в режиме "Тренд"
+        lastProfileData = data;
+
+        // Обновляем график в зависимости от текущего режима
+        if (chartMode === 'trend') {
+            populateDepthSelect(data);
+            const selectedSensorId = document.getElementById('depth-select').value;
+            loadSensorTrend(selectedSensorId);
+        } else {
+            updateChart(objectId, data);
+        }
     } catch (err) {
         console.error('Ошибка при загрузке данных:', err);
         document.getElementById('chartTitle').innerText = `Объект: ${objectId} — ошибка загрузки данных`;
@@ -199,6 +226,228 @@ async function loadSensorDataForObject(objectId) {
 }
 // Переменная для хранения ID текущего выбранного объекта
 let currentSelectedObjectId = null;
+
+// Текущий режим графика: 'profile' (срез по глубине) или 'trend' (история по времени)
+let chartMode = 'profile';
+
+// Последние загруженные данные профиля — нужны, чтобы построить список глубин для тренда
+let lastProfileData = [];
+
+// Последние загруженные данные тренда — нужны для экспорта в CSV
+let lastTrendData = [];
+let lastTrendSensorId = null;
+
+// Форматирует выбранную дату в формате, который понимает сервер (UTC, с 'Z')
+function getSelectedDateParam() {
+    const dateInput = document.getElementById('reading-date').value;
+    return dateInput ? dateInput + ':00Z' : '';
+}
+
+// Заполняет выпадающий список глубин на основе последнего загруженного профиля объекта
+function populateDepthSelect(data) {
+    const select = document.getElementById('depth-select');
+    select.innerHTML = '';
+    data
+        .slice()
+        .sort((a, b) => b.depth_m - a.depth_m)
+        .forEach(item => {
+            const option = document.createElement('option');
+            option.value = item.sensor_id;
+            option.textContent = `${item.depth_m} м (${item.sensor_id})`;
+            select.appendChild(option);
+        });
+}
+
+// Загружает и рисует тренд (историю измерений) для конкретного датчика
+async function loadSensorTrend(sensorId) {
+    if (!sensorId) return;
+
+    if (ilChart) {
+        ilChart.destroy();
+        ilChart = null;
+    }
+    document.getElementById('chartTitle').innerText = `Датчик: ${sensorId} — загрузка тренда...`;
+
+    try {
+        const response = await fetch(`/api/sensor-trend/${sensorId}?limit=50`, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`Сервер вернул ошибку: ${response.status}`);
+
+        const data = await response.json();
+
+        if (!data || data.length === 0) {
+            document.getElementById('chartTitle').innerText = `Датчик: ${sensorId} — нет данных`;
+            lastTrendData = [];
+            lastTrendSensorId = sensorId;
+            return;
+        }
+
+        lastTrendData = data;
+        lastTrendSensorId = sensorId;
+        updateTrendChart(sensorId, data);
+        
+    } catch (err) {
+        console.error('Ошибка при загрузке тренда:', err);
+        document.getElementById('chartTitle').innerText = `Датчик: ${sensorId} — ошибка загрузки`;
+    }
+}
+
+// Рисует график тренда: время по оси X, IL по оси Y
+function updateTrendChart(sensorId, data) {
+    const ctx = document.getElementById('ilChart').getContext('2d');
+    document.getElementById('chartTitle').innerText = `Датчик: ${sensorId} — тренд IL`;
+
+    const labels = data.map(item => {
+        const d = new Date(item.timestamp);
+        return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    });
+    const values = data.map(item => item.il_value);
+
+    if (ilChart) {
+        ilChart.destroy();
+    }
+
+    ilChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Индекс влажности (IL) во времени',
+                data: values,
+                borderColor: '#2563eb',
+                backgroundColor: 'rgba(37, 99, 235, 0.15)',
+                borderWidth: 2,
+                pointRadius: 4,
+                tension: 0.2,
+                fill: true,
+                pointBackgroundColor: values.map(il => {
+                    if (il === null) return '#94a3b8';
+                    if (il <= 0) return '#22c55e';
+                    if (il <= 1) return '#eab308';
+                    return '#ef4444';
+                })
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                x: {
+                    title: { display: true, text: 'Время измерения' },
+                    ticks: { maxRotation: 45, minRotation: 45 }
+                },
+                y: {
+                    title: { display: true, text: 'Liquidity Index (IL)' },
+                    grid: { color: '#e2e8f0' }
+                }
+            },
+            plugins: {
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            return `IL: ${context.parsed.y !== null ? context.parsed.y.toFixed(4) : 'нет данных'}`;
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+// Преобразует массив объектов в CSV-строку
+function arrayToCSV(rows, columns) {
+    const header = columns.map(c => c.label).join(';');
+    const lines = rows.map(row =>
+        columns.map(c => {
+            const val = row[c.key];
+            return (val === null || val === undefined) ? '' : String(val).replace(/;/g, ',');
+        }).join(';')
+    );
+    return [header, ...lines].join('\n');
+}
+
+// Скачивает строку как CSV-файл
+function downloadCSV(csvString, filename) {
+    // \uFEFF — BOM, чтобы Excel корректно определял кодировку UTF-8 и кириллицу
+    const blob = new Blob(['\uFEFF' + csvString], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+}
+
+// Экспортирует данные текущего отображённого графика (профиль или тренд) в CSV
+document.getElementById('exportCsvBtn').addEventListener('click', () => {
+    if (chartMode === 'profile') {
+        if (!lastProfileData || lastProfileData.length === 0) {
+            alert('Нет данных для экспорта. Сначала выберите объект.');
+            return;
+        }
+        const csv = arrayToCSV(lastProfileData, [
+            { key: 'sensor_id', label: 'sensor_id' },
+            { key: 'depth_m', label: 'depth_m' },
+            { key: 'timestamp', label: 'timestamp' },
+            { key: 'w_percent', label: 'w_percent' },
+            { key: 'wl_value', label: 'wl_value' },
+            { key: 'wp_value', label: 'wp_value' },
+            { key: 'il_value', label: 'il_value' }
+        ]);
+        const objId = currentSelectedObjectId || 'object';
+        downloadCSV(csv, `profile_object_${objId}.csv`);
+    } else {
+        if (!lastTrendData || lastTrendData.length === 0) {
+            alert('Нет данных для экспорта. Сначала выберите глубину датчика в режиме "Тренд".');
+            return;
+        }
+        const csv = arrayToCSV(lastTrendData, [
+            { key: 'timestamp', label: 'timestamp' },
+            { key: 'w_percent', label: 'w_percent' },
+            { key: 'wl_value', label: 'wl_value' },
+            { key: 'wp_value', label: 'wp_value' },
+            { key: 'il_value', label: 'il_value' }
+        ]);
+        const sensorId = lastTrendSensorId || 'sensor';
+        downloadCSV(csv, `trend_sensor_${sensorId}.csv`);
+    }
+});
+
+// Переключение между режимами "Профиль" и "Тренд"
+document.getElementById('modeProfileBtn').addEventListener('click', () => {
+    chartMode = 'profile';
+    document.getElementById('modeProfileBtn').classList.replace('bg-gray-200', 'bg-blue-600');
+    document.getElementById('modeProfileBtn').classList.replace('text-gray-700', 'text-white');
+    document.getElementById('modeTrendBtn').classList.replace('bg-blue-600', 'bg-gray-200');
+    document.getElementById('modeTrendBtn').classList.replace('text-white', 'text-gray-700');
+    document.getElementById('depthSelectWrapper').style.display = 'none';
+
+    if (currentSelectedObjectId) {
+        loadSensorDataForObject(currentSelectedObjectId);
+    }
+});
+
+document.getElementById('modeTrendBtn').addEventListener('click', () => {
+    chartMode = 'trend';
+    document.getElementById('modeTrendBtn').classList.replace('bg-gray-200', 'bg-blue-600');
+    document.getElementById('modeTrendBtn').classList.replace('text-gray-700', 'text-white');
+    document.getElementById('modeProfileBtn').classList.replace('bg-blue-600', 'bg-gray-200');
+    document.getElementById('modeProfileBtn').classList.replace('text-white', 'text-gray-700');
+    document.getElementById('depthSelectWrapper').style.display = 'block';
+
+    if (lastProfileData.length > 0) {
+        populateDepthSelect(lastProfileData);
+        const firstSensorId = document.getElementById('depth-select').value;
+        loadSensorTrend(firstSensorId);
+    } else if (currentSelectedObjectId) {
+        alert('Сначала выберите объект и дату с доступными данными, чтобы получить список датчиков');
+    }
+});
+
+document.getElementById('depth-select').addEventListener('change', function() {
+    loadSensorTrend(this.value);
+});
 
 // Слушаем событие изменения даты в календаре
 document.getElementById('reading-date').addEventListener('change', function() {
@@ -212,9 +461,10 @@ document.getElementById('reading-date').addEventListener('change', function() {
 document.getElementById('apply-date-btn').addEventListener('click', function() {
     if (currentSelectedObjectId) {
         loadSensorDataForObject(currentSelectedObjectId);
-    } else {
-        alert('Сначала выберите объект на карте');
     }
+    // Перекрашиваем точки на карте и обновляем активные слои интерполяции под новую дату
+    loadObjects(getSelectedDateParam());
+    refreshInterpolationLayers();
 });
 </script>
             <!-- Правая панель: Карта -->
@@ -254,7 +504,7 @@ document.getElementById('apply-date-btn').addEventListener('click', function() {
 // 1. Объявляем переменные в самом верху
 let interpolationLayer = null;
 
-// 2. Функция для создания слоя интерполяции (IDW)
+// 2. Функция для создания слоя интерполяции (Kriging)
 function createIDWLayer(data, map) {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
@@ -274,35 +524,57 @@ function createIDWLayer(data, map) {
         return [cp.x / scale, cp.y / scale, p[2]];
     });
 
+    // Если точек меньше 3 — кригинг обучить нельзя, показываем только фон
+    if (points.length < 3) {
+        const bounds = map.getBounds();
+        return L.imageOverlay(canvas.toDataURL(), bounds, {
+            opacity: 0.8, interactive: false, zIndex: 5
+        });
+    }
+
+    // Обучаем модель кригинга на значениях объектов
+    const t = points.map(p => p[2]); // Целевая переменная (avg_il)
+    const xArr = points.map(p => p[0]);
+    const yArr = points.map(p => p[1]);
+    const model = "exponential"; // варианты: "gaussian", "exponential", "spherical"
+    const sigma2 = 0;
+    const alpha = 100;
+    const variogram = kriging.train(t, xArr, yArr, model, sigma2, alpha);
+
+    // Переводим желаемый радиус ореола из МЕТРОВ в пиксели canvas
+    // на основе текущего зума карты, чтобы размер пятна на местности
+    // не менялся при приближении/отдалении
+    const RADIUS_METERS = 300; // радиус зоны влияния датчика, метры — подбери под свою карту
+    const EDGE_METERS = 350;   // расстояние, на котором ореол полностью затухает
+
+    const centerLat = map.getCenter().lat;
+    const metersPerPixel = 156543.03392 * Math.cos(centerLat * Math.PI / 180) / Math.pow(2, map.getZoom());
+
+    const cutoffPx = (RADIUS_METERS / metersPerPixel) / scale;
+    const edgePx = (EDGE_METERS / metersPerPixel) / scale;
+
     // Проходим по пикселям
     for (let y = 0; y < canvas.height; y++) {
         for (let x = 0; x < canvas.width; x++) {
-            let num = 0, den = 0;
             let closestDist = Infinity;
 
             for (let i = 0; i < points.length; i++) {
                 const dx = x - points[i][0];
                 const dy = y - points[i][1];
                 const d = Math.sqrt(dx * dx + dy * dy);
-                
                 if (d < closestDist) closestDist = d;
-
-                // Математика интерполяции
-                const weight = 1 / Math.pow(d, 3); // Степень 3 вместо 2 делает ореолы вокруг точек компактнее
-                num += points[i][2] * weight;
-                den += weight;
             }
 
-            // ПРОВЕРКА ДИСТАНЦИИ: 
-            // Если до ближайшего датчика больше 50 пикселей (на мини-холсте), 
+            // ПРОВЕРКА ДИСТАНЦИИ (теперь в реальных метрах, а не в пикселях):
+            // Если до ближайшего датчика больше заданного радиуса,
             // оставляем пиксель зеленым и идем дальше.
-            if (closestDist > 40) continue; 
+            if (closestDist > cutoffPx) continue; 
 
-            const val = num / den;
+            // Предсказание значения кригингом в этой точке
+            const val = kriging.predict(x, y, variogram);
 
             // Вычисляем прозрачность в зависимости от расстояния (чтобы края пятен были мягкими)
-            // Чем дальше от датчика, тем сильнее просвечивает зеленый фон
-            let edgeAlpha = 1 - (closestDist / 50);
+            let edgeAlpha = 1 - (closestDist / edgePx);
             if (edgeAlpha < 0) edgeAlpha = 0;
 
             // Определяем цвет пятна вокруг датчика
@@ -330,11 +602,14 @@ document.getElementById('toggleKriging').addEventListener('click', async functio
         map.removeLayer(interpolationLayer);
         interpolationLayer = null;
         this.innerText = "Average IL";
+        updateLayerLegend();
         return;
     }
 
     try {
-        const response = await fetch('/api/objects');
+        const dateParam = getSelectedDateParam();
+        const url = dateParam ? `/api/objects?date=${encodeURIComponent(dateParam)}` : '/api/objects';
+        const response = await fetch(url, { cache: 'no-store' });
         const objects = await response.json();
         
         const idwData = objects
@@ -348,6 +623,7 @@ document.getElementById('toggleKriging').addEventListener('click', async functio
         interpolationLayer.addTo(map);
 
         this.innerText = "Hide IL Map";
+        updateLayerLegend();
 
         // Перерисовывать при сдвиге карты, чтобы охват всегда был на весь экран
         map.once('moveend', () => {
@@ -374,6 +650,7 @@ document.getElementById('toggleWMap').addEventListener('click', async function()
         wLayer = null;
         this.innerText = "Average W";
         this.classList.replace('bg-red-600', 'bg-teal-500');
+        updateLayerLegend();
         return;
     }
 
@@ -381,7 +658,9 @@ document.getElementById('toggleWMap').addEventListener('click', async function()
     if (interpolationLayer) document.getElementById('toggleKriging').click();
 
     try {
-        const response = await fetch('/api/objects');
+        const dateParam = getSelectedDateParam();
+        const url = dateParam ? `/api/objects?date=${encodeURIComponent(dateParam)}` : '/api/objects';
+        const response = await fetch(url, { cache: 'no-store' });
         const objects = await response.json();
         
         // Берем данные avg_w (влажность)
@@ -397,6 +676,7 @@ document.getElementById('toggleWMap').addEventListener('click', async function()
 
         this.innerText = "Hide W Map";
         this.classList.replace('bg-teal-500', 'bg-red-600');
+        updateLayerLegend();
 
     } catch (err) {
         console.error(err);
@@ -422,7 +702,13 @@ function createWLayer(data, map) {
         return [cp.x / scale, cp.y / scale, p[2]];
     });
 
-    const radius = 45; // Чуть увеличили радиус для лучшего слияния
+    // Переводим желаемый радиус ореола из МЕТРОВ в пиксели canvas
+    // на основе текущего зума карты, чтобы размер пятна на местности
+    // не менялся при приближении/отдалении
+    const RADIUS_METERS = 300; // подбери под свою карту, как и для IL-слоя
+    const centerLat = map.getCenter().lat;
+    const metersPerPixel = 156543.03392 * Math.cos(centerLat * Math.PI / 180) / Math.pow(2, map.getZoom());
+    const radius = (RADIUS_METERS / metersPerPixel) / scale;
 
     points.forEach(p => {
         const x = p[0];
@@ -471,6 +757,50 @@ function createWLayer(data, map) {
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '© OpenStreetMap'
         }).addTo(map);
+
+        // --- Легенда карты ---
+        const legend = L.control({ position: 'bottomright' });
+        legend.onAdd = function() {
+            const div = L.DomUtil.create('div', 'map-legend');
+            div.innerHTML = `
+                <div style="background:white;padding:10px 12px;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,0.2);font-family:sans-serif;font-size:12px;line-height:1.7;min-width:170px;">
+                    <b style="display:block;margin-bottom:6px;font-size:13px;">Точки объектов (IL)</b>
+                    <div><span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:#22c55e;margin-right:7px;"></span>Норма (IL ≤ 0)</div>
+                    <div><span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:#eab308;margin-right:7px;"></span>Риск (0 &lt; IL ≤ 1)</div>
+                    <div><span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:#ef4444;margin-right:7px;"></span>Подтопление (IL &gt; 1)</div>
+                    <div><span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:#94a3b8;margin-right:7px;"></span>Нет данных</div>
+                    <div id="layerLegendSection" style="display:none;margin-top:8px;padding-top:8px;border-top:1px solid #e5e7eb;"></div>
+                </div>
+            `;
+            L.DomEvent.disableClickPropagation(div);
+            return div;
+        };
+        legend.addTo(map);
+
+        // Показывает/скрывает пояснение для активного слоя интерполяции
+        function updateLayerLegend() {
+            const section = document.getElementById('layerLegendSection');
+            if (interpolationLayer) {
+                section.style.display = 'block';
+                section.innerHTML = `
+                    <b style="display:block;margin-bottom:6px;font-size:13px;">Слой: Average IL</b>
+                    <div><span style="display:inline-block;width:14px;height:11px;background:rgba(34,197,94,0.4);margin-right:7px;"></span>Норма</div>
+                    <div><span style="display:inline-block;width:14px;height:11px;background:rgba(234,179,8,0.5);margin-right:7px;"></span>Риск</div>
+                    <div><span style="display:inline-block;width:14px;height:11px;background:rgba(239,68,68,0.6);margin-right:7px;"></span>Подтопление</div>
+                `;
+            } else if (wLayer) {
+                section.style.display = 'block';
+                section.innerHTML = `
+                    <b style="display:block;margin-bottom:6px;font-size:13px;">Слой: Average W</b>
+                    <div><span style="display:inline-block;width:14px;height:11px;background:rgba(239,68,68,0.6);margin-right:7px;"></span>W &lt; 20%</div>
+                    <div><span style="display:inline-block;width:14px;height:11px;background:rgba(185,28,28,0.6);margin-right:7px;"></span>20% ≤ W &lt; 30%</div>
+                    <div><span style="display:inline-block;width:14px;height:11px;background:rgba(127,29,29,0.6);margin-right:7px;"></span>W ≥ 30%</div>
+                `;
+            } else {
+                section.style.display = 'none';
+                section.innerHTML = '';
+            }
+        }
 
         let ilChart; // Переменная для хранения экземпляра графика
 
@@ -561,9 +891,14 @@ data.sort((a, b) => b.depth_m - a.depth_m);
         }
 
         // --- 3. Загрузка объектов на карту ---
-        async function loadObjects() {
+        async function loadObjects(dateParam) {
     try {
-        const response = await fetch('/api/objects');
+        // Удаляем старые маркеры перед перерисовкой (иначе будут дублироваться)
+        Object.values(markersByObjectId).forEach(marker => map.removeLayer(marker));
+        for (const key in markersByObjectId) delete markersByObjectId[key];
+
+        const url = dateParam ? `/api/objects?date=${encodeURIComponent(dateParam)}` : '/api/objects';
+        const response = await fetch(url, { cache: 'no-store' });
         const objects = await response.json();
 
         objects.forEach(obj => {
@@ -639,7 +974,51 @@ data.sort((a, b) => b.depth_m - a.depth_m);
         console.error("Ошибка загрузки объектов:", err);
     }
 }
-        
+
+        // Обновляет активные слои интерполяции (IL / W) под текущую выбранную дату
+        async function refreshInterpolationLayers() {
+            const dateParam = getSelectedDateParam();
+            const url = dateParam ? `/api/objects?date=${encodeURIComponent(dateParam)}` : '/api/objects';
+
+            if (interpolationLayer) {
+                const response = await fetch(url, { cache: 'no-store' });
+                const objects = await response.json();
+                const idwData = objects
+                    .filter(o => o.avg_il !== null)
+                    .map(o => [parseFloat(o.lat), parseFloat(o.lng), parseFloat(o.avg_il)]);
+
+                map.removeLayer(interpolationLayer);
+                if (idwData.length > 0) {
+                    interpolationLayer = createIDWLayer(idwData, map);
+                    interpolationLayer.addTo(map);
+                } else {
+                    interpolationLayer = null;
+                    document.getElementById('toggleKriging').innerText = "Average IL";
+                }
+            }
+
+            if (wLayer) {
+                const response = await fetch(url, { cache: 'no-store' });
+                const objects = await response.json();
+                const wData = objects
+                    .filter(o => o.avg_w !== null)
+                    .map(o => [parseFloat(o.lat), parseFloat(o.lng), parseFloat(o.avg_w)]);
+
+                map.removeLayer(wLayer);
+                if (wData.length > 0) {
+                    wLayer = createWLayer(wData, map);
+                    wLayer.addTo(map);
+                } else {
+                    wLayer = null;
+                    document.getElementById('toggleWMap').innerText = "Average W";
+                }
+            }
+
+            updateLayerLegend();
+        }
+
+
+
 
         // --- 4. Поиск объекта на карте ---
         function goToObject(rawId) {
@@ -670,7 +1049,7 @@ data.sort((a, b) => b.depth_m - a.depth_m);
             }
         });
 
-        loadObjects();
+        loadObjects(getSelectedDateParam());
     </script>
 </body>
 </html>

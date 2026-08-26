@@ -36,16 +36,39 @@ app.use(express.static('public'));
  */
 // 1. Получение объектов для КАРТЫ
 app.get('/api/objects', async (req, res) => {
+    const selectedDate = req.query.date;
+
     try {
-        const query = `
-            SELECT 
-                o.object_id, o.lat, o.lng, o.n_levels,
-                (SELECT AVG(il_value) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id WHERE s.object_id = o.object_id) as avg_il,
-                (SELECT AVG(w_percent) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id WHERE s.object_id = o.object_id) as avg_w
-            FROM objects o;
-        `;
-        const { rows } = await pool.query(query);
-        console.log("ОТВЕТ ДЛЯ КАРТЫ:", rows); // Смотрите это в черном окне терминала!
+        let query, values;
+
+        if (selectedDate) {
+            // Средние значения ТОЛЬКО за выбранную минуту (округление до минуты)
+            query = `
+                SELECT 
+                    o.object_id, o.lat, o.lng, o.n_levels,
+                    (SELECT AVG(il_value) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id 
+                        WHERE s.object_id = o.object_id 
+                          AND date_trunc('minute', sr.timestamp) = date_trunc('minute', $1::timestamptz)) as avg_il,
+                    (SELECT AVG(w_percent) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id 
+                        WHERE s.object_id = o.object_id 
+                          AND date_trunc('minute', sr.timestamp) = date_trunc('minute', $1::timestamptz)) as avg_w
+                FROM objects o;
+            `;
+            values = [selectedDate];
+        } else {
+            // Без даты — средние за всё время (как было раньше)
+            query = `
+                SELECT 
+                    o.object_id, o.lat, o.lng, o.n_levels,
+                    (SELECT AVG(il_value) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id WHERE s.object_id = o.object_id) as avg_il,
+                    (SELECT AVG(w_percent) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id WHERE s.object_id = o.object_id) as avg_w
+                FROM objects o;
+            `;
+            values = [];
+        }
+
+        const { rows } = await pool.query(query, values);
+        console.log("ОТВЕТ ДЛЯ КАРТЫ:", rows);
         res.json(rows);
     } catch (err) {
         console.error("ОШИБКА КАРТЫ:", err.message);
@@ -96,6 +119,29 @@ app.get('/api/object-details/:objectId', async (req, res) => {
     }
 });
 
+
+// Получение временного ряда (тренда) для конкретного датчика
+app.get('/api/sensor-trend/:sensorId', async (req, res) => {
+    const { sensorId } = req.params;
+    const limit = parseInt(req.query.limit) || 50; // сколько последних измерений показать
+
+    try {
+        const query = `
+            SELECT timestamp, w_percent, wl_value, wp_value, il_value
+            FROM sensor_readings
+            WHERE sensor_id = $1
+            ORDER BY timestamp DESC
+            LIMIT $2;
+        `;
+        const result = await pool.query(query, [sensorId, limit]);
+
+        // Разворачиваем в хронологическом порядке (старые -> новые), так удобнее для графика
+        res.json(result.rows.reverse());
+    } catch (err) {
+        console.error('Ошибка при получении тренда датчика:', err);
+        res.status(500).json({ success: false, message: 'Ошибка сервера' });
+    }
+});
 
 // Обязательно убедитесь, что включен парсер JSON в начале server.js:
 app.use(express.json());
