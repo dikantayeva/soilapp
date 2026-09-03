@@ -10,10 +10,10 @@ const PORT = process.env.PORT || 3000;
 const pool = new Pool({
     // Если есть целая строка DATABASE_URL, используем её, иначе собираем из кусочков
     connectionString: process.env.DATABASE_URL || `postgres://${process.env.DB_USER}:${process.env.DB_PASSWORD}@${process.env.DB_HOST}:${process.env.DB_PORT}/${process.env.DB_NAME}`,
-    
+
     // Проверяем на localhost безопасно
-    ssl: (process.env.DATABASE_URL && process.env.DATABASE_URL.includes('localhost')) || process.env.DB_HOST === 'localhost' 
-        ? false 
+    ssl: (process.env.DATABASE_URL && process.env.DATABASE_URL.includes('localhost')) || process.env.DB_HOST === 'localhost'
+        ? false
         : { rejectUnauthorized: false }
 });
 
@@ -23,12 +23,6 @@ pool.query('SELECT NOW()', (err) => {
     else console.log('✅ База данных подключена успешно!');
 });
 
-// Фиксируем таймзону сессии в UTC, чтобы даты из фронта
-// сравнивались с данными в базе без смещения
-pool.on('connect', (client) => {
-    client.query('SET timezone = "UTC";');
-});
-
 app.use(express.static('public'));
 
 /**
@@ -36,39 +30,16 @@ app.use(express.static('public'));
  */
 // 1. Получение объектов для КАРТЫ
 app.get('/api/objects', async (req, res) => {
-    const selectedDate = req.query.date;
-
     try {
-        let query, values;
-
-        if (selectedDate) {
-            // Средние значения ТОЛЬКО за выбранную минуту (округление до минуты)
-            query = `
-                SELECT 
-                    o.object_id, o.lat, o.lng, o.n_levels,
-                    (SELECT AVG(il_value) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id 
-                        WHERE s.object_id = o.object_id 
-                          AND date_trunc('minute', sr.timestamp) = date_trunc('minute', $1::timestamptz)) as avg_il,
-                    (SELECT AVG(w_percent) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id 
-                        WHERE s.object_id = o.object_id 
-                          AND date_trunc('minute', sr.timestamp) = date_trunc('minute', $1::timestamptz)) as avg_w
-                FROM objects o;
-            `;
-            values = [selectedDate];
-        } else {
-            // Без даты — средние за всё время (как было раньше)
-            query = `
-                SELECT 
-                    o.object_id, o.lat, o.lng, o.n_levels,
-                    (SELECT AVG(il_value) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id WHERE s.object_id = o.object_id) as avg_il,
-                    (SELECT AVG(w_percent) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id WHERE s.object_id = o.object_id) as avg_w
-                FROM objects o;
-            `;
-            values = [];
-        }
-
-        const { rows } = await pool.query(query, values);
-        console.log("ОТВЕТ ДЛЯ КАРТЫ:", rows);
+        const query = `
+            SELECT
+                o.object_id, o.lat, o.lng, o.n_levels,
+                (SELECT AVG(il_value) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id WHERE s.object_id = o.object_id) as avg_il,
+                (SELECT AVG(w_percent) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id WHERE s.object_id = o.object_id) as avg_w
+            FROM objects o;
+        `;
+        const { rows } = await pool.query(query);
+        console.log("ОТВЕТ ДЛЯ КАРТЫ:", rows); // Смотрите это в черном окне терминала!
         res.json(rows);
     } catch (err) {
         console.error("ОШИБКА КАРТЫ:", err.message);
@@ -85,22 +56,18 @@ app.get('/api/object-details/:objectId', async (req, res) => {
         let query, values;
 
         if (selectedDate) {
+            const targetDay = selectedDate.split(' ')[0];
             query = `
-                SELECT * FROM (
-                    SELECT DISTINCT ON (S.sensor_id)
-                        SR.*, S.depth_m 
-                    FROM sensors S
-                    JOIN sensor_readings SR ON S.sensor_id = SR.sensor_id
-                    WHERE S.object_id = $1 
-                      AND date_trunc('minute', SR.timestamp) = date_trunc('minute', $2::timestamptz)
-                    ORDER BY S.sensor_id, SR.timestamp DESC
-                ) sub
-                ORDER BY depth_m ASC;
+                SELECT SR.*, S.depth_m
+                FROM sensors S
+                JOIN sensor_readings SR ON S.sensor_id = SR.sensor_id
+                WHERE S.object_id = $1 AND DATE(SR.timestamp) = $2
+                ORDER BY S.depth_m ASC;
             `;
-            values = [objectId, selectedDate];
+            values = [objectId, targetDay];
         } else {
             query = `
-                SELECT SR.*, S.depth_m 
+                SELECT SR.*, S.depth_m
                 FROM sensors S
                 JOIN sensor_readings SR ON S.sensor_id = SR.sensor_id
                 WHERE S.object_id = $1
@@ -109,7 +76,6 @@ app.get('/api/object-details/:objectId', async (req, res) => {
             values = [objectId];
         }
 
-        
         const result = await pool.query(query, values);
         res.json(result.rows);
 
@@ -119,40 +85,16 @@ app.get('/api/object-details/:objectId', async (req, res) => {
     }
 });
 
-
-// Получение временного ряда (тренда) для конкретного датчика
-app.get('/api/sensor-trend/:sensorId', async (req, res) => {
-    const { sensorId } = req.params;
-    const limit = parseInt(req.query.limit) || 50; // сколько последних измерений показать
-
-    try {
-        const query = `
-            SELECT timestamp, w_percent, wl_value, wp_value, il_value
-            FROM sensor_readings
-            WHERE sensor_id = $1
-            ORDER BY timestamp DESC
-            LIMIT $2;
-        `;
-        const result = await pool.query(query, [sensorId, limit]);
-
-        // Разворачиваем в хронологическом порядке (старые -> новые), так удобнее для графика
-        res.json(result.rows.reverse());
-    } catch (err) {
-        console.error('Ошибка при получении тренда датчика:', err);
-        res.status(500).json({ success: false, message: 'Ошибка сервера' });
-    }
-});
-
 // Обязательно убедитесь, что включен парсер JSON в начале server.js:
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
 
 // Маршрут для обработки авторизации
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
-    
+
     try {
         const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-        
+
         if (result.rows.length === 0) {
             return res.status(401).json({ success: false, message: 'Неверный логин или пароль' });
         }
@@ -164,11 +106,11 @@ app.post('/api/login', async (req, res) => {
             return res.status(401).json({ success: false, message: 'Неверный логин или пароль' });
         }
 
-        res.json({ 
-            success: true, 
-            role: user.role, 
+        res.json({
+            success: true,
+            role: user.role,
             username: user.username,
-            message: 'Успешный вход' 
+            message: 'Успешный вход'
         });
 
     } catch (err) {
@@ -179,22 +121,22 @@ app.post('/api/login', async (req, res) => {
 
 
 app.post('/api/telemetry', async (req, res) => {
-    const { 
-        sensor_id, 
-        object_id, 
-        depth_m, 
-        w_percent, 
-        wl_value, 
-        wp_value, 
-        il_value, 
-        timestamp 
+    const {
+        sensor_id,
+        object_id,
+        depth_m,
+        w_percent,
+        wl_value,
+        wp_value,
+        il_value,
+        timestamp
     } = req.body;
 
     // Проверяем обязательные поля
     if (!sensor_id || !object_id || depth_m === undefined) {
-        return res.status(400).json({ 
-            success: false, 
-            message: 'Отсутствуют обязательные параметры (sensor_id, object_id или depth_m)' 
+        return res.status(400).json({
+            success: false,
+            message: 'Отсутствуют обязательные параметры (sensor_id, object_id или depth_m)'
         });
     }
 
@@ -213,16 +155,16 @@ app.post('/api/telemetry', async (req, res) => {
             VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING *;
         `;
-        
+
         // Если timestamp не передан извне, можно подставить текущее время (NOW())
         const eventTime = timestamp || new Date();
 
         const values = [
-            sensor_id, 
-            eventTime, 
-            w_percent || null, 
-            wl_value || null, 
-            wp_value || null, 
+            sensor_id,
+            eventTime,
+            w_percent || null,
+            wl_value || null,
+            wp_value || null,
             il_value || null
         ];
 
@@ -237,6 +179,111 @@ app.post('/api/telemetry', async (req, res) => {
     } catch (err) {
         console.error('Ошибка при сохранении телеметрии:', err);
         res.status(500).json({ success: false, message: 'Ошибка сервера при записи данных' });
+    }
+});
+
+/**
+ * Пакетная отправка телеметрии — приём большого пакета показаний ОДНИМ запросом,
+ * вместо отдельного POST на каждое значение.
+ *
+ * Тело запроса — один из двух вариантов:
+ *   [ {...}, {...}, ... ]                варианты полей как в /api/telemetry
+ *   { "readings": [ {...}, {...} ] }
+ *
+ * Каждый элемент массива:
+ *   { "sensor_id", "object_id", "depth_m", "w_percent", "wl_value", "wp_value", "il_value", "timestamp" }
+ *   (timestamp необязателен — если не передан, подставляется текущее время)
+ *
+ * Одна повреждённая/неполная запись в пакете НЕ отменяет весь пакет —
+ * она просто попадает в "errors", а остальные записи сохраняются.
+ */
+app.post('/api/telemetry/batch', async (req, res) => {
+    const readings = Array.isArray(req.body) ? req.body : req.body?.readings;
+
+    if (!Array.isArray(readings) || readings.length === 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'Ожидается массив показаний: [ {...}, {...} ] или { "readings": [ {...}, {...} ] }'
+        });
+    }
+
+    // Разбираем и валидируем каждую запись отдельно, чтобы одна плохая запись
+    // не роняла весь пакет
+    const valid = [];
+    const errors = [];
+
+    readings.forEach((item, index) => {
+        const { sensor_id, object_id, depth_m, w_percent, wl_value, wp_value, il_value, timestamp } = item || {};
+
+        if (!sensor_id || !object_id || depth_m === undefined) {
+            errors.push({
+                index,
+                sensor_id: sensor_id ?? null,
+                message: 'Отсутствуют обязательные параметры (sensor_id, object_id или depth_m)'
+            });
+            return;
+        }
+
+        valid.push({
+            sensor_id,
+            object_id,
+            depth_m,
+            w_percent: w_percent ?? null,
+            wl_value: wl_value ?? null,
+            wp_value: wp_value ?? null,
+            il_value: il_value ?? null,
+            timestamp: timestamp || new Date().toISOString()
+        });
+    });
+
+    if (valid.length === 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'Ни одна запись в пакете не прошла проверку',
+            saved_count: 0,
+            error_count: errors.length,
+            errors
+        });
+    }
+
+    try {
+        // Шаг 1. Регистрируем все новые датчики одним запросом (уже существующие пропускаются)
+        await pool.query(`
+            INSERT INTO sensors (sensor_id, object_id, depth_m)
+            SELECT * FROM UNNEST($1::text[], $2::text[], $3::numeric[])
+            ON CONFLICT (sensor_id) DO NOTHING;
+        `, [
+            valid.map(v => v.sensor_id),
+            valid.map(v => v.object_id),
+            valid.map(v => v.depth_m)
+        ]);
+
+        // Шаг 2. Вставляем ВСЕ показания одним запросом (а не по одному)
+        const result = await pool.query(`
+            INSERT INTO sensor_readings (sensor_id, timestamp, w_percent, wl_value, wp_value, il_value)
+            SELECT * FROM UNNEST($1::text[], $2::timestamptz[], $3::numeric[], $4::numeric[], $5::numeric[], $6::numeric[])
+            RETURNING *;
+        `, [
+            valid.map(v => v.sensor_id),
+            valid.map(v => v.timestamp),
+            valid.map(v => v.w_percent),
+            valid.map(v => v.wl_value),
+            valid.map(v => v.wp_value),
+            valid.map(v => v.il_value)
+        ]);
+
+        res.json({
+            success: true,
+            message: `Сохранено ${result.rows.length} из ${readings.length} показаний`,
+            saved_count: result.rows.length,
+            error_count: errors.length,
+            readings: result.rows,
+            errors
+        });
+
+    } catch (err) {
+        console.error('Ошибка при пакетном сохранении телеметрии:', err);
+        res.status(500).json({ success: false, message: 'Ошибка сервера при пакетной записи данных' });
     }
 });
 
