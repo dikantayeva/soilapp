@@ -213,8 +213,18 @@ async function loadSensorDataForObject(objectId) {
         if (requestId !== profileRequestSeq) return;
 
         if (!data || data.length === 0) {
-            // Данных за выбранную дату нет — график остаётся пустым
+            // Данных за выбранную дату нет — график остаётся пустым.
+            // Важно также очистить старый список датчиков в дропдауне
+            // "Тренд по времени" и lastProfileData — иначе там продолжает
+            // висеть список от последнего объекта, для которого данные были,
+            // и это выглядит так, будто клик "не сработал"
             document.getElementById('chartTitle').innerText = `Объект: ${objectId} — нет данных за выбранную дату`;
+            lastProfileData = [];
+            document.getElementById('depth-select').innerHTML = '';
+            if (ilChart) {
+                ilChart.destroy();
+                ilChart = null;
+            }
             return;
         }
 
