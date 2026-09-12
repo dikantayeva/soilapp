@@ -174,6 +174,12 @@ window.addEventListener('DOMContentLoaded', () => {
 async function loadSensorDataForObject(objectId) {
     currentSelectedObjectId = objectId; // запоминаем выбранный объект
 
+    // Помечаем этот запрос как "самый последний" — если пока он летит,
+    // пользователь кликнет другой объект или сменит дату, тот новый запрос
+    // перебьёт этот номер, и когда текущий (устаревший) ответ придёт,
+    // мы его проигнорируем
+    const requestId = ++profileRequestSeq;
+
     // Сразу убираем старый график, чтобы он не "залипал",
     // пока не пришёл ответ по новой дате
     if (ilChart) {
@@ -202,6 +208,10 @@ async function loadSensorDataForObject(objectId) {
         const data = await response.json();
         console.log("Данные, полученные от сервера:", data);
 
+        // Если за время ожидания пользователь успел выбрать другой объект
+        // или другую дату — этот ответ уже устарел, применять его нельзя
+        if (requestId !== profileRequestSeq) return;
+
         if (!data || data.length === 0) {
             // Данных за выбранную дату нет — график остаётся пустым
             document.getElementById('chartTitle').innerText = `Объект: ${objectId} — нет данных за выбранную дату`;
@@ -220,6 +230,7 @@ async function loadSensorDataForObject(objectId) {
             updateChart(objectId, data);
         }
     } catch (err) {
+        if (requestId !== profileRequestSeq) return;
         console.error('Ошибка при загрузке данных:', err);
         document.getElementById('chartTitle').innerText = `Объект: ${objectId} — ошибка загрузки данных`;
     }
@@ -236,6 +247,13 @@ let lastProfileData = [];
 // Последние загруженные данные тренда — нужны для экспорта в CSV
 let lastTrendData = [];
 let lastTrendSensorId = null;
+
+// Счётчики для защиты от гонки асинхронных запросов: каждый новый запрос
+// получает следующий номер и применяется только если он всё ещё
+// самый последний запрошенный — более ранние, но задержавшиеся в сети
+// ответы безопасно игнорируются
+let profileRequestSeq = 0;
+let trendRequestSeq = 0;
 
 // Форматирует выбранную дату в формате, который понимает сервер (UTC, с 'Z')
 function getSelectedDateParam() {
@@ -262,6 +280,9 @@ function populateDepthSelect(data) {
 async function loadSensorTrend(sensorId) {
     if (!sensorId) return;
 
+    // Та же защита от гонки: игнорируем ответ, если он устарел
+    const requestId = ++trendRequestSeq;
+
     if (ilChart) {
         ilChart.destroy();
         ilChart = null;
@@ -273,6 +294,9 @@ async function loadSensorTrend(sensorId) {
         if (!response.ok) throw new Error(`Сервер вернул ошибку: ${response.status}`);
 
         const data = await response.json();
+
+        // Устаревший ответ — пока он летел, выбрали другой датчик/объект/дату
+        if (requestId !== trendRequestSeq) return;
 
         if (!data || data.length === 0) {
             document.getElementById('chartTitle').innerText = `Датчик: ${sensorId} — нет данных`;
@@ -286,6 +310,7 @@ async function loadSensorTrend(sensorId) {
         updateTrendChart(sensorId, data);
         
     } catch (err) {
+        if (requestId !== trendRequestSeq) return;
         console.error('Ошибка при загрузке тренда:', err);
         document.getElementById('chartTitle').innerText = `Датчик: ${sensorId} — ошибка загрузки`;
     }
@@ -449,13 +474,9 @@ document.getElementById('depth-select').addEventListener('change', function() {
     loadSensorTrend(this.value);
 });
 
-// Слушаем событие изменения даты в календаре
-document.getElementById('reading-date').addEventListener('change', function() {
-    // Если объект на карте уже был выбран, при смене даты сразу пересчитываем график
-    if (currentSelectedObjectId) {
-        loadSensorDataForObject(currentSelectedObjectId);
-    }
-});
+// Смену даты применяем только по явному нажатию "Ок" — раньше здесь был ещё
+// и слушатель 'change' на самом инпуте, который дублировал запрос и повышал
+// риск гонки (см. profileRequestSeq выше)
 
 // Слушаем нажатие на кнопку "Ок"
 document.getElementById('apply-date-btn').addEventListener('click', function() {
@@ -501,106 +522,14 @@ document.getElementById('apply-date-btn').addEventListener('click', function() {
 
     <script>
  // 1. Объявляем переменные ГЛОБАЛЬНО в самом верху
-// 1. Объявляем переменные в самом верху
 let interpolationLayer = null;
 
-// 2. Функция для создания слоя интерполяции (Kriging)
-function createIDWLayer(data, map) {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    const size = map.getSize();
-    
-    // Оптимальное разрешение для баланса скорости и красоты
-    const scale = 4; 
-    canvas.width = size.x / scale;
-    canvas.height = size.y / scale;
-
-    // Сначала заливаем весь холст дефолтным ЗЕЛЕНЫМ
-    ctx.fillStyle = "rgba(34, 197, 94, 0.4)"; // Тот самый зеленый
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    const points = data.map(p => {
-        const cp = map.latLngToContainerPoint([p[0], p[1]]);
-        return [cp.x / scale, cp.y / scale, p[2]];
-    });
-
-    // Если точек меньше 3 — кригинг обучить нельзя, показываем только фон
-    if (points.length < 3) {
-        const bounds = map.getBounds();
-        return L.imageOverlay(canvas.toDataURL(), bounds, {
-            opacity: 0.8, interactive: false, zIndex: 5
-        });
-    }
-
-    // Обучаем модель кригинга на значениях объектов
-    const t = points.map(p => p[2]); // Целевая переменная (avg_il)
-    const xArr = points.map(p => p[0]);
-    const yArr = points.map(p => p[1]);
-    const model = "exponential"; // варианты: "gaussian", "exponential", "spherical"
-    const sigma2 = 0;
-    const alpha = 100;
-    const variogram = kriging.train(t, xArr, yArr, model, sigma2, alpha);
-
-    // Переводим желаемый радиус ореола из МЕТРОВ в пиксели canvas
-    // на основе текущего зума карты, чтобы размер пятна на местности
-    // не менялся при приближении/отдалении
-    const RADIUS_METERS = 300; // радиус зоны влияния датчика, метры — подбери под свою карту
-    const EDGE_METERS = 350;   // расстояние, на котором ореол полностью затухает
-
-    const centerLat = map.getCenter().lat;
-    const metersPerPixel = 156543.03392 * Math.cos(centerLat * Math.PI / 180) / Math.pow(2, map.getZoom());
-
-    const cutoffPx = (RADIUS_METERS / metersPerPixel) / scale;
-    const edgePx = (EDGE_METERS / metersPerPixel) / scale;
-
-    // Проходим по пикселям
-    for (let y = 0; y < canvas.height; y++) {
-        for (let x = 0; x < canvas.width; x++) {
-            let closestDist = Infinity;
-
-            for (let i = 0; i < points.length; i++) {
-                const dx = x - points[i][0];
-                const dy = y - points[i][1];
-                const d = Math.sqrt(dx * dx + dy * dy);
-                if (d < closestDist) closestDist = d;
-            }
-
-            // ПРОВЕРКА ДИСТАНЦИИ (теперь в реальных метрах, а не в пикселях):
-            // Если до ближайшего датчика больше заданного радиуса,
-            // оставляем пиксель зеленым и идем дальше.
-            if (closestDist > cutoffPx) continue; 
-
-            // Предсказание значения кригингом в этой точке
-            const val = kriging.predict(x, y, variogram);
-
-            // Вычисляем прозрачность в зависимости от расстояния (чтобы края пятен были мягкими)
-            let edgeAlpha = 1 - (closestDist / edgePx);
-            if (edgeAlpha < 0) edgeAlpha = 0;
-
-            // Определяем цвет пятна вокруг датчика
-            let color;
-            if (val <= 0.5) continue; // Если значение и так низкое, пусть остается зеленый фон
-            else if (val <= 1.0) color = `rgba(234, 179, 8, ${0.5 * edgeAlpha})`; // Желтый ореол
-            else color = `rgba(239, 68, 68, ${0.6 * edgeAlpha})`; // Красный ореол
-
-            ctx.fillStyle = color;
-            ctx.fillRect(x, y, 1, 1);
-        }
-    }
-
-    const bounds = map.getBounds();
-    return L.imageOverlay(canvas.toDataURL(), bounds, {
-        opacity: 0.8,
-        interactive: false,
-        zIndex: 5
-    });
-}
-
-// 3. Обработчик кнопки
+// 2. Обработчик кнопки "Average IL"
 document.getElementById('toggleKriging').addEventListener('click', async function() {
     if (interpolationLayer) {
         map.removeLayer(interpolationLayer);
         interpolationLayer = null;
+        ilVariogram = null;
         this.innerText = "Average IL";
         updateLayerLegend();
         return;
@@ -618,21 +547,8 @@ document.getElementById('toggleKriging').addEventListener('click', async functio
 
         if (idwData.length === 0) return alert("Нет данных");
 
-        // Создаем и добавляем слой
-        interpolationLayer = createIDWLayer(idwData, map);
-        interpolationLayer.addTo(map);
-
+        activateIlLayer(idwData);
         this.innerText = "Hide IL Map";
-        updateLayerLegend();
-
-        // Перерисовывать при сдвиге карты, чтобы охват всегда был на весь экран
-        map.once('moveend', () => {
-            if (interpolationLayer) {
-                map.removeLayer(interpolationLayer);
-                interpolationLayer = createIDWLayer(idwData, map);
-                interpolationLayer.addTo(map);
-            }
-        });
 
     } catch (err) {
         console.error(err);
@@ -776,6 +692,118 @@ function createWLayer(data, map) {
             return div;
         };
         legend.addTo(map);
+
+        // --- Кригинг: обучение модели и предсказание IL в ЛЮБОЙ точке карты ---
+
+        const EARTH_RADIUS = 6378137; // метров, для локальной проекции
+        const PROJ_REF_LAT = 51.1228;
+        const PROJ_REF_LNG = 71.4271;
+
+        // Переводит lat/lng в локальные метровые координаты (плоская проекция),
+        // НЕ зависящие от текущего зума/панорамирования карты
+        function projectLatLng(lat, lng) {
+            const x = (lng - PROJ_REF_LNG) * Math.PI / 180 * EARTH_RADIUS * Math.cos(PROJ_REF_LAT * Math.PI / 180);
+            const y = (lat - PROJ_REF_LAT) * Math.PI / 180 * EARTH_RADIUS;
+            return [x, y];
+        }
+
+        let ilVariogram = null; // текущая обученная модель кригинга для Average IL
+
+        // Обучает модель кригинга на реальных координатах объектов (в метрах)
+        function trainIlVariogram(data) {
+            const t = data.map(p => p[2]);
+            const coords = data.map(p => projectLatLng(p[0], p[1]));
+            const xArr = coords.map(c => c[0]);
+            const yArr = coords.map(c => c[1]);
+
+            const model = "exponential";
+            const sigma2 = 0;
+            const alpha = 100;
+
+            ilVariogram = kriging.train(t, xArr, yArr, model, sigma2, alpha);
+        }
+
+        // Цвет для конкретного предсказанного значения IL
+        function ilValueToColor(val) {
+            if (val <= 0) return 'rgba(34, 197, 94, 0.5)';
+            if (val <= 1) return 'rgba(234, 179, 8, 0.5)';
+            return 'rgba(239, 68, 68, 0.55)';
+        }
+
+        // Рисует слой прогноза IL на ВЕСЬ видимый охват карты
+        function drawIlSurface(map) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            const size = map.getSize();
+            const scale = 4;
+            canvas.width = size.x / scale;
+            canvas.height = size.y / scale;
+
+            if (ilVariogram) {
+                for (let py = 0; py < canvas.height; py++) {
+                    for (let px = 0; px < canvas.width; px++) {
+                        const latlng = map.containerPointToLatLng(L.point(px * scale, py * scale));
+                        const [x, y] = projectLatLng(latlng.lat, latlng.lng);
+                        let val = kriging.predict(x, y, ilVariogram);
+
+                        if (val < -2) val = -2;
+                        if (val > 3) val = 3;
+
+                        ctx.fillStyle = ilValueToColor(val);
+                        ctx.fillRect(px, py, 1, 1);
+                    }
+                }
+            }
+
+            const bounds = map.getBounds();
+            return L.imageOverlay(canvas.toDataURL(), bounds, {
+                opacity: 0.75,
+                interactive: false,
+                zIndex: 5
+            });
+        }
+
+        // Включает слой прогноза IL: обучает модель и рисует поверхность
+        function activateIlLayer(idwData) {
+            trainIlVariogram(idwData);
+
+            if (interpolationLayer) map.removeLayer(interpolationLayer);
+            interpolationLayer = drawIlSurface(map);
+            interpolationLayer.addTo(map);
+
+            updateLayerLegend();
+        }
+
+        map.on('moveend', () => {
+            if (interpolationLayer && ilVariogram) {
+                map.removeLayer(interpolationLayer);
+                interpolationLayer = drawIlSurface(map);
+                interpolationLayer.addTo(map);
+            }
+        });
+
+        map.on('click', function(e) {
+            if (!interpolationLayer || !ilVariogram) return;
+
+            const [x, y] = projectLatLng(e.latlng.lat, e.latlng.lng);
+            const predictedIL = kriging.predict(x, y, ilVariogram);
+
+            let statusText, statusColor;
+            if (predictedIL <= 0) { statusText = 'Норма'; statusColor = '#16a34a'; }
+            else if (predictedIL <= 1) { statusText = 'Риск'; statusColor = '#ca8a04'; }
+            else { statusText = 'Подтопление'; statusColor = '#dc2626'; }
+
+            L.popup()
+                .setLatLng(e.latlng)
+                .setContent(`
+                    <div style="font-family:sans-serif;font-size:13px;text-align:center;">
+                        <b>Прогноз Average IL:</b> ${predictedIL.toFixed(3)}<br>
+                        <span style="color:${statusColor};font-weight:bold;">${statusText}</span><br>
+                        <span style="font-size:10px;color:#888;">Кригинг-интерполяция — реального датчика здесь нет</span>
+                    </div>
+                `)
+                .openOn(map);
+        });
 
         // Показывает/скрывает пояснение для активного слоя интерполяции
         function updateLayerLegend() {
@@ -952,7 +980,8 @@ data.sort((a, b) => b.depth_m - a.depth_m);
     `);
 
     // 4. Клик на точку для обновления графика (с учётом выбранной даты)
-    marker.on('click', () => {
+    marker.on('click', (e) => {
+        L.DomEvent.stopPropagation(e); // чтобы клик по маркеру не открывал ещё и прогноз кригинга
         console.log("Клик по объекту:", obj.object_id);
         loadSensorDataForObject(obj.object_id);
     });
@@ -987,12 +1016,12 @@ data.sort((a, b) => b.depth_m - a.depth_m);
                     .filter(o => o.avg_il !== null)
                     .map(o => [parseFloat(o.lat), parseFloat(o.lng), parseFloat(o.avg_il)]);
 
-                map.removeLayer(interpolationLayer);
                 if (idwData.length > 0) {
-                    interpolationLayer = createIDWLayer(idwData, map);
-                    interpolationLayer.addTo(map);
+                    activateIlLayer(idwData); // переобучает модель на новых данных
                 } else {
+                    map.removeLayer(interpolationLayer);
                     interpolationLayer = null;
+                    ilVariogram = null;
                     document.getElementById('toggleKriging').innerText = "Average IL";
                 }
             }
