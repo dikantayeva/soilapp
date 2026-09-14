@@ -17,16 +17,22 @@ const pool = new Pool({
         : { rejectUnauthorized: false }
 });
 
+// Часовой пояс: сами данные (timestamptz) хранятся корректно в UTC в любом случае,
+// но без этого DATE(...) в запросах считает календарный день по UTC, а не по Алматы.
+// Из-за разницы в 5 часов показания, снятые ночью/рано утром по времени Алматы,
+// "уезжали" на предыдущий UTC-день и не попадали в выборку по нужной дате.
+// Переключаем часовой пояс КАЖДОГО подключения из пула на Asia/Almaty,
+// чтобы DATE(sr.timestamp) везде считался по алматинскому календарному дню.
+pool.on('connect', (client) => {
+    client.query("SET TIME ZONE 'Asia/Almaty';").catch((err) => {
+        console.error('❌ Не удалось выставить часовой пояс соединения:', err.message);
+    });
+});
+
 // Проверка подключения
 pool.query('SELECT NOW()', (err) => {
     if (err) console.error('❌ Ошибка базы:', err.message);
     else console.log('✅ База данных подключена успешно!');
-});
-
-// Фиксируем таймзону сессии в UTC, чтобы даты из фронта
-// сравнивались с данными в базе без смещения
-pool.on('connect', (client) => {
-    client.query('SET timezone = "UTC";');
 });
 
 app.use(express.static('public'));
@@ -34,28 +40,28 @@ app.use(express.static('public'));
 /**
  * 1. Получение всех объектов для отображения на карте
  */
+// 1. Получение объектов для КАРТЫ
 app.get('/api/objects', async (req, res) => {
+    // Дата среза (необязательна) — та же дата, что выбрана в календаре на фронтенде.
+    // Без неё avg_il/avg_w считались по ВСЕЙ истории показаний, поэтому цвет точек
+    // на карте не менялся при смене даты.
     const selectedDate = req.query.date;
 
     try {
-        let query, values;
+        let query;
+        const values = [];
 
         if (selectedDate) {
-            // Средние значения ТОЛЬКО за выбранную минуту (округление до минуты)
+            const targetDay = selectedDate.split(' ')[0].split('T')[0]; // берём только дату, без времени
+            values.push(targetDay);
             query = `
                 SELECT
                     o.object_id, o.lat, o.lng, o.n_levels,
-                    (SELECT AVG(il_value) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id
-                        WHERE s.object_id = o.object_id
-                          AND date_trunc('minute', sr.timestamp) = date_trunc('minute', $1::timestamptz)) as avg_il,
-                    (SELECT AVG(w_percent) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id
-                        WHERE s.object_id = o.object_id
-                          AND date_trunc('minute', sr.timestamp) = date_trunc('minute', $1::timestamptz)) as avg_w
+                    (SELECT AVG(il_value) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id WHERE s.object_id = o.object_id AND DATE(sr.timestamp) = $1) as avg_il,
+                    (SELECT AVG(w_percent) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id WHERE s.object_id = o.object_id AND DATE(sr.timestamp) = $1) as avg_w
                 FROM objects o;
             `;
-            values = [selectedDate];
         } else {
-            // Без даты — средние за всё время
             query = `
                 SELECT
                     o.object_id, o.lat, o.lng, o.n_levels,
@@ -63,11 +69,10 @@ app.get('/api/objects', async (req, res) => {
                     (SELECT AVG(w_percent) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id WHERE s.object_id = o.object_id) as avg_w
                 FROM objects o;
             `;
-            values = [];
         }
 
         const { rows } = await pool.query(query, values);
-        console.log("ОТВЕТ ДЛЯ КАРТЫ:", rows);
+        console.log("ОТВЕТ ДЛЯ КАРТЫ:", rows); // Смотрите это в черном окне терминала!
         res.json(rows);
     } catch (err) {
         console.error("ОШИБКА КАРТЫ:", err.message);
@@ -75,7 +80,7 @@ app.get('/api/objects', async (req, res) => {
     }
 });
 
-// 2. Получение данных для ГРАФИКА (профиль объекта по глубине на выбранную дату)
+// 2. Получение данных для ГРАФИКА
 app.get('/api/object-details/:objectId', async (req, res) => {
     const { objectId } = req.params;
     const selectedDate = req.query.date;
@@ -84,19 +89,15 @@ app.get('/api/object-details/:objectId', async (req, res) => {
         let query, values;
 
         if (selectedDate) {
+            const targetDay = selectedDate.split(' ')[0];
             query = `
-                SELECT * FROM (
-                    SELECT DISTINCT ON (S.sensor_id)
-                        SR.*, S.depth_m
-                    FROM sensors S
-                    JOIN sensor_readings SR ON S.sensor_id = SR.sensor_id
-                    WHERE S.object_id = $1
-                      AND date_trunc('minute', SR.timestamp) = date_trunc('minute', $2::timestamptz)
-                    ORDER BY S.sensor_id, SR.timestamp DESC
-                ) sub
-                ORDER BY depth_m ASC;
+                SELECT SR.*, S.depth_m
+                FROM sensors S
+                JOIN sensor_readings SR ON S.sensor_id = SR.sensor_id
+                WHERE S.object_id = $1 AND DATE(SR.timestamp) = $2
+                ORDER BY S.depth_m ASC;
             `;
-            values = [objectId, selectedDate];
+            values = [objectId, targetDay];
         } else {
             query = `
                 SELECT SR.*, S.depth_m
@@ -113,29 +114,6 @@ app.get('/api/object-details/:objectId', async (req, res) => {
 
     } catch (err) {
         console.error('Ошибка при получении данных объекта:', err);
-        res.status(500).json({ success: false, message: 'Ошибка сервера' });
-    }
-});
-
-// 3. Получение временного ряда (тренда) для конкретного датчика
-app.get('/api/sensor-trend/:sensorId', async (req, res) => {
-    const { sensorId } = req.params;
-    const limit = parseInt(req.query.limit) || 50; // сколько последних измерений показать
-
-    try {
-        const query = `
-            SELECT timestamp, w_percent, wl_value, wp_value, il_value
-            FROM sensor_readings
-            WHERE sensor_id = $1
-            ORDER BY timestamp DESC
-            LIMIT $2;
-        `;
-        const result = await pool.query(query, [sensorId, limit]);
-
-        // Разворачиваем в хронологическом порядке (старые -> новые), так удобнее для графика
-        res.json(result.rows.reverse());
-    } catch (err) {
-        console.error('Ошибка при получении тренда датчика:', err);
         res.status(500).json({ success: false, message: 'Ошибка сервера' });
     }
 });
