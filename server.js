@@ -52,13 +52,17 @@ app.get('/api/objects', async (req, res) => {
         const values = [];
 
         if (selectedDate) {
-            const targetDay = selectedDate.split(' ')[0].split('T')[0]; // берём только дату, без времени
-            values.push(targetDay);
+            // Сравниваем конкретную МИНУТУ, а не весь день (секунды игнорируем —
+            // телеметрия может приходить с небольшим смещением в секундах).
+            // Раньше тут было DATE(sr.timestamp) = $1, из-за чего в среднее
+            // попадали ВСЕ показания за сутки, а не только за выбранное время —
+            // из-за этого точки на карте не различали 9:55 и 10:10.
+            values.push(selectedDate);
             query = `
                 SELECT
                     o.object_id, o.lat, o.lng, o.n_levels,
-                    (SELECT AVG(il_value) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id WHERE s.object_id = o.object_id AND DATE(sr.timestamp) = $1) as avg_il,
-                    (SELECT AVG(w_percent) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id WHERE s.object_id = o.object_id AND DATE(sr.timestamp) = $1) as avg_w
+                    (SELECT AVG(il_value) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id WHERE s.object_id = o.object_id AND date_trunc('minute', sr.timestamp) = date_trunc('minute', $1::timestamptz)) as avg_il,
+                    (SELECT AVG(w_percent) FROM sensor_readings sr JOIN sensors s ON sr.sensor_id = s.sensor_id WHERE s.object_id = o.object_id AND date_trunc('minute', sr.timestamp) = date_trunc('minute', $1::timestamptz)) as avg_w
                 FROM objects o;
             `;
         } else {
@@ -89,15 +93,19 @@ app.get('/api/object-details/:objectId', async (req, res) => {
         let query, values;
 
         if (selectedDate) {
-            const targetDay = selectedDate.split(' ')[0];
+            // Сравниваем конкретную минуту, а не весь день (раньше DATE(SR.timestamp) = $2
+            // подтягивал ВСЕ показания за сутки — отсюда по 2-3 точки на один и тот же
+            // уровень глубины в графике "Профиль по глубине" и задвоенные/затроенные
+            // строки в дропдауне "Тренд по времени" — там каждая такая лишняя запись
+            // превращалась в отдельный <option>).
             query = `
                 SELECT SR.*, S.depth_m
                 FROM sensors S
                 JOIN sensor_readings SR ON S.sensor_id = SR.sensor_id
-                WHERE S.object_id = $1 AND DATE(SR.timestamp) = $2
+                WHERE S.object_id = $1 AND date_trunc('minute', SR.timestamp) = date_trunc('minute', $2::timestamptz)
                 ORDER BY S.depth_m ASC;
             `;
-            values = [objectId, targetDay];
+            values = [objectId, selectedDate];
         } else {
             query = `
                 SELECT SR.*, S.depth_m
@@ -115,6 +123,33 @@ app.get('/api/object-details/:objectId', async (req, res) => {
     } catch (err) {
         console.error('Ошибка при получении данных объекта:', err);
         res.status(500).json({ success: false, message: 'Ошибка сервера' });
+    }
+});
+
+// 3. Получение истории измерений ОДНОГО датчика (для графика "Тренд по времени").
+// Этого маршрута не было на сервере, поэтому кнопка "Тренд по времени"
+// на фронтенде падала с "ошибка загрузки" — fetch получал 404.
+app.get('/api/sensor-trend/:sensorId', async (req, res) => {
+    const { sensorId } = req.params;
+    // Защита от бессмысленно большого запроса с фронтенда
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+
+    try {
+        const query = `
+            SELECT * FROM (
+                SELECT sensor_id, timestamp, w_percent, wl_value, wp_value, il_value
+                FROM sensor_readings
+                WHERE sensor_id = $1
+                ORDER BY timestamp DESC
+                LIMIT $2
+            ) last_readings
+            ORDER BY timestamp ASC;
+        `;
+        const result = await pool.query(query, [sensorId, limit]);
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Ошибка при получении тренда датчика:', err);
+        res.status(500).json({ success: false, message: 'Ошибка сервера при получении тренда' });
     }
 });
 

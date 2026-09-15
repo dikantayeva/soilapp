@@ -188,13 +188,10 @@ async function loadSensorDataForObject(objectId) {
     }
     document.getElementById('chartTitle').innerText = `Объект: ${objectId} — загрузка...`;
 
-    // 1. Берем значение из календаря
-    const dateInput = document.getElementById('reading-date').value;
-    console.log("Выбранная дата из инпута:", dateInput);
+    // 1. Берем значение из календаря и приводим к формату, понятному серверу
+    const formattedDate = getSelectedDateParam();
+    console.log("Выбранная дата из инпута:", formattedDate);
 
-    // Форматируем для сервера: явно указываем 'Z' (UTC),
-    // чтобы не зависеть от настроек таймзоны сессии на стороне БД
-    const formattedDate = dateInput ? dateInput + ':00Z' : '';
     const url = `/api/object-details/${objectId}?date=${encodeURIComponent(formattedDate)}`;
     console.log("URL запроса к серверу:", url);
 
@@ -265,10 +262,17 @@ let lastTrendSensorId = null;
 let profileRequestSeq = 0;
 let trendRequestSeq = 0;
 
-// Форматирует выбранную дату в формате, который понимает сервер (UTC, с 'Z')
+// Форматирует выбранную дату в формате, который понимает сервер.
+// ВАЖНО: input[type=datetime-local] хранит "наивное" время — то, что вы
+// буквально видите и выбрали в календаре, БЕЗ часового пояса. Это время
+// по Алматы (ваш часовой пояс), а не UTC. Раньше здесь стояло ':00Z' —
+// то есть выбранные 9:55 сервер читал как "9:55 UTC" (= 14:55 по Алматы),
+// из-за чего фильтр по времени "уезжал" на 5 часов от того, что вы
+// выбрали. Алматы всегда UTC+5 (без перехода на летнее время), поэтому
+// смещение можно зашить константой '+05:00'.
 function getSelectedDateParam() {
     const dateInput = document.getElementById('reading-date').value;
-    return dateInput ? dateInput + ':00Z' : '';
+    return dateInput ? dateInput + ':00+05:00' : '';
 }
 
 // Заполняет выпадающий список глубин на основе последнего загруженного профиля объекта
